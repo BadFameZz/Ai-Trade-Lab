@@ -1,5 +1,6 @@
-.env
-data/
-__pycache__/
-*.pyc
+dist/
 .DS_Store
+__pycache__/
+.pytest_cache/
+app/data/
+app/.env

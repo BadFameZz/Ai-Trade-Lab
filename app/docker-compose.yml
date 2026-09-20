@@ -1,0 +1,25 @@
+services:
+  ai-trade-lab:
+    build: .
+    image: ai-trade-lab:local
+    container_name: ai-trade-lab
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      TRADING_MODE: paper   # Live ist in dieser Version nicht implementiert
+    ports:
+      - "8787:8787"
+    volumes:
+      - ./data:/app/data
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

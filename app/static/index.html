@@ -1,0 +1,270 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="robots" content="noindex, nofollow">
+<meta name="theme-color" content="#05070d">
+<title>Aitra · AI Trade Lab</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='16' fill='%230a84ff'/%3E%3Cpath d='M16 44l10-14 8 8 14-20' stroke='white' stroke-width='5' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
+<style>
+:root{
+  --bg:#05070d; --panel:rgba(255,255,255,.045); --panel-2:rgba(255,255,255,.07); --line:rgba(255,255,255,.08);
+  --text:#f2f4f8; --muted:rgba(235,238,245,.55); --blue:#0a84ff; --green:#30d158; --red:#ff453a; --orange:#ff9f0a;
+  --radius:22px;
+}
+*{box-sizing:border-box}
+html,body{height:100%}
+body{margin:0;background:
+  radial-gradient(1200px 700px at 85% -10%,rgba(10,132,255,.16),transparent 60%),
+  radial-gradient(900px 600px at -10% 110%,rgba(48,209,88,.09),transparent 60%),var(--bg);
+  color:var(--text);font:15px/1.45 -apple-system,BlinkMacSystemFont,"SF Pro Text","Inter","Segoe UI",system-ui,sans-serif;
+  -webkit-font-smoothing:antialiased;letter-spacing:-.01em}
+.app{display:grid;grid-template-columns:248px 1fr;min-height:100vh}
+aside{position:sticky;top:0;height:100vh;padding:26px 16px;border-right:1px solid var(--line);
+  background:rgba(10,12,20,.55);backdrop-filter:blur(30px) saturate(160%);-webkit-backdrop-filter:blur(30px) saturate(160%);display:flex;flex-direction:column;gap:22px}
+.logo{display:flex;gap:12px;align-items:center;padding:0 8px}
+.logo i{width:38px;height:38px;border-radius:11px;background:linear-gradient(135deg,#0a84ff,#5e5ce6);display:grid;place-items:center;box-shadow:0 8px 24px -8px rgba(10,132,255,.8)}
+.logo b{font-size:17px;display:block}.logo small{color:var(--muted);font-size:12px}
+nav{display:flex;flex-direction:column;gap:2px}
+nav a{display:flex;justify-content:space-between;align-items:center;padding:9px 12px;border-radius:10px;color:var(--muted);text-decoration:none;font-size:14px;font-weight:500}
+nav a.on{background:var(--panel-2);color:var(--text)}
+nav a span{font-size:10px;letter-spacing:.06em;opacity:.6}
+.side-status{margin-top:auto;display:grid;gap:8px;padding:14px;border-radius:16px;background:var(--panel);border:1px solid var(--line);font-size:12.5px}
+.side-status div{display:flex;justify-content:space-between;gap:8px}
+main{padding:30px 34px 60px;max-width:1400px;width:100%}
+header{display:flex;justify-content:space-between;align-items:flex-end;gap:16px;flex-wrap:wrap;margin-bottom:26px}
+h1{font-size:34px;font-weight:700;letter-spacing:-.03em;margin:0}
+.sub{color:var(--muted);margin-top:4px;font-size:14px}
+.pills{display:flex;gap:8px;flex-wrap:wrap}
+.pill{display:inline-flex;align-items:center;gap:7px;padding:7px 13px;border-radius:999px;background:var(--panel);border:1px solid var(--line);font-size:12.5px;font-weight:600}
+.dot{width:7px;height:7px;border-radius:50%;background:var(--muted)}
+.dot.g{background:var(--green);box-shadow:0 0 10px var(--green)}.dot.r{background:var(--red);box-shadow:0 0 10px var(--red)}.dot.o{background:var(--orange)}
+.grid{display:grid;gap:16px}
+.kpis{grid-template-columns:repeat(5,minmax(0,1fr))}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);padding:20px 22px;backdrop-filter:blur(20px);-webkit-backdrop-filter:blur(20px);min-width:0}
+.card h3{margin:0 0 14px;font-size:13px;font-weight:600;color:var(--muted);letter-spacing:.02em;display:flex;justify-content:space-between;align-items:center}
+.kpi .v{font-size:28px;font-weight:700;letter-spacing:-.03em;font-variant-numeric:tabular-nums}
+.kpi .l{font-size:12.5px;color:var(--muted);margin-top:2px}
+.pos{color:var(--green)}.neg{color:var(--red)}.muted{color:var(--muted)}
+.row2{grid-template-columns:1.25fr 1fr;margin-top:16px}
+.row3{grid-template-columns:1fr 1fr 1fr;margin-top:16px}
+.chart-empty{height:220px;border-radius:16px;border:1px dashed var(--line);display:grid;place-items:center;text-align:center;color:var(--muted);font-size:13.5px;padding:20px;
+  background:linear-gradient(180deg,rgba(10,132,255,.06),transparent)}
+.kv{display:grid;gap:10px}
+.kv div{display:flex;justify-content:space-between;gap:12px;font-size:14px;padding-bottom:10px;border-bottom:1px solid var(--line)}
+.kv div:last-child{border-bottom:0;padding-bottom:0}
+.kv b{font-variant-numeric:tabular-nums;font-weight:600}
+.bar{height:6px;border-radius:99px;background:var(--panel-2);overflow:hidden;margin-top:6px}.bar i{display:block;height:100%;background:var(--green);border-radius:99px}
+.btns{display:flex;gap:8px;margin-top:16px;flex-wrap:wrap}
+button{font:inherit;font-size:13.5px;font-weight:600;border-radius:12px;padding:10px 16px;border:1px solid var(--line);background:var(--panel-2);color:var(--text);cursor:pointer}
+button.danger{background:rgba(255,69,58,.14);border-color:rgba(255,69,58,.35);color:#ff8a82}
+button:disabled{opacity:.45;cursor:not-allowed}
+.table{width:100%;border-collapse:collapse;font-size:13.5px}
+.table th{text-align:left;font-weight:600;color:var(--muted);font-size:12px;padding:0 10px 10px}
+.table td{padding:11px 10px;border-top:1px solid var(--line);vertical-align:top}
+.table td.r{white-space:nowrap}
+.tag{display:inline-block;padding:2px 8px;border-radius:6px;font-size:11.5px;font-weight:700;letter-spacing:.03em;background:var(--panel-2)}
+.tag.BUY{color:var(--green);background:rgba(48,209,88,.12)}.tag.SELL{color:var(--red);background:rgba(255,69,58,.12)}.tag.WAIT{color:#8fc1ff;background:rgba(10,132,255,.12)}
+.ok{color:var(--green)}.no{color:var(--red)}
+.scroll{overflow-x:auto}
+.ev{font:12.5px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace;color:var(--muted);display:grid;gap:6px;max-height:300px;overflow:auto}
+.ev div{white-space:pre-wrap}.ev .WARN{color:var(--orange)}.ev .ERROR{color:var(--red)}
+.toast{position:fixed;right:22px;bottom:22px;padding:12px 16px;border-radius:14px;background:rgba(30,32,40,.95);border:1px solid var(--line);font-size:14px;opacity:0;transform:translateY(10px);transition:.25s}
+.toast.show{opacity:1;transform:none}
+@media (max-width:1180px){.kpis{grid-template-columns:repeat(3,1fr)}.row3{grid-template-columns:1fr 1fr}}
+@media (max-width:900px){.app{grid-template-columns:1fr}aside{position:static;height:auto;flex-direction:row;flex-wrap:wrap;align-items:center}nav{display:none}.side-status{margin:0}
+  main{padding:22px 18px}.kpis{grid-template-columns:1fr 1fr}.row2,.row3{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+<div class="app">
+  <aside>
+    <div class="logo">
+      <i><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M4 17l6-8 4 4 6-9"/></svg></i>
+      <div><b>Aitra</b><small>AI Trader Lab · v<span id="ver">–</span></small></div>
+    </div>
+    <nav>
+      <a class="on" href="#">Dashboard</a>
+      <a>Trading <span>BALD</span></a>
+      <a>Strategien <span>BALD</span></a>
+      <a>Backtests <span>BALD</span></a>
+      <a>News &amp; Sentiment <span>BALD</span></a>
+      <a>KI Analyst <span>BALD</span></a>
+      <a>Entwicklung <span>BALD</span></a>
+      <a href="#protokolle">Protokolle</a>
+      <a>Einstellungen <span>BALD</span></a>
+    </nav>
+    <div class="side-status">
+      <div><span>Paper Trading</span><b class="ok">ACTIVE</b></div>
+      <div><span>Live Trading</span><b class="no">LOCKED</b></div>
+      <div><span>Virtual Capital</span><b id="cap">–</b></div>
+    </div>
+  </aside>
+
+  <main>
+    <header>
+      <div>
+        <h1>Dashboard</h1>
+        <div class="sub">Paper-Trading-Labor · <span id="clock">–</span></div>
+      </div>
+      <div class="pills">
+        <span class="pill"><i class="dot g"></i>PAPER</span>
+        <span class="pill" id="p-risk"><i class="dot"></i>Risk –</span>
+        <span class="pill" id="p-health"><i class="dot"></i>Health –</span>
+      </div>
+    </header>
+
+    <section class="grid kpis">
+      <div class="card kpi"><div class="v" id="k-eq">–</div><div class="l">Portfolio (USDC)</div></div>
+      <div class="card kpi"><div class="v" id="k-day">–</div><div class="l">Heute P/L</div></div>
+      <div class="card kpi"><div class="v" id="k-trades">0</div><div class="l">Trades gesamt</div></div>
+      <div class="card kpi"><div class="v muted">—</div><div class="l">Trefferquote</div></div>
+      <div class="card kpi"><div class="v muted">—</div><div class="l">Max Drawdown</div></div>
+    </section>
+
+    <section class="grid row2">
+      <div class="card">
+        <h3>Portfolio-Verlauf <span class="muted">vs. BTC Buy &amp; Hold</span></h3>
+        <div class="chart-empty">Noch keine Daten.<br>Der Chart erscheint, sobald Marktdaten und Paper-Ledger laufen (Phase 2 + 3).</div>
+      </div>
+      <div class="card">
+        <h3>Risk Engine <span id="ks-state">–</span></h3>
+        <div class="kv">
+          <div><span>Max. Positionsgröße</span><b id="l-pos">–</b></div>
+          <div><span>Max. Gesamtrisiko</span><b id="l-exp">–</b></div>
+          <div><span>Tagesverlust / Limit</span><b id="l-loss">–</b></div>
+          <div style="display:block"><div class="bar"><i id="loss-bar" style="width:0"></i></div></div>
+          <div><span>Erlaubt</span><b>Spot only · keine Hebel · keine Withdrawals</b></div>
+        </div>
+        <div class="btns">
+          <button class="danger" id="ks-on">Kill Switch aktivieren</button>
+          <button id="ks-off">Freigeben …</button>
+        </div>
+      </div>
+    </section>
+
+    <section class="grid row3">
+      <div class="card">
+        <h3>System Health</h3>
+        <div class="kv" id="health"></div>
+      </div>
+      <div class="card">
+        <h3>Offene Positionen</h3>
+        <div class="muted" style="font-size:14px">Keine offenen Positionen.</div>
+      </div>
+      <div class="card">
+        <h3>Marktregime</h3>
+        <div class="kv"><div><span>Aktuell</span><b class="muted">UNKNOWN</b></div><div><span>Grund</span><b class="muted">keine Marktdaten</b></div></div>
+      </div>
+    </section>
+
+    <section class="card" style="margin-top:16px">
+      <h3>Decision Journal <span class="muted" id="dj-count"></span></h3>
+      <div class="scroll">
+        <table class="table">
+          <thead><tr><th>Zeit (UTC)</th><th>Symbol</th><th>Aktion</th><th>Größe</th><th>Conf.</th><th>Risk Engine</th><th>Begründung</th></tr></thead>
+          <tbody id="dj"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="card" style="margin-top:16px" id="protokolle">
+      <h3>Systemprotokoll</h3>
+      <div class="ev" id="events"></div>
+    </section>
+  </main>
+</div>
+<div class="toast" id="toast"></div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const fmt = (n, d = 2) => Number(n).toLocaleString('de-DE', { minimumFractionDigits: d, maximumFractionDigits: d });
+const signed = (n) => (n > 0 ? '+' : '') + fmt(n);
+const text = (el, t, cls) => { el.textContent = t; if (cls !== undefined) el.className = cls; };
+function toast(msg) { const t = $('toast'); t.textContent = msg; t.classList.add('show'); setTimeout(() => t.classList.remove('show'), 2600); }
+function pill(id, label, kind) { const p = $(id); p.replaceChildren(); const d = document.createElement('i'); d.className = 'dot ' + kind; p.append(d, label); }
+function cell(tr, t, cls) { const td = document.createElement('td'); if (cls) td.className = cls; if (t instanceof Node) td.append(t); else td.textContent = t; tr.append(td); return td; }
+
+async function j(url, opts) { const r = await fetch(url, opts); return { ok: r.ok, status: r.status, body: await r.json().catch(() => ({})) }; }
+
+async function loadStatus() {
+  const { body: s } = await j('/api/status');
+  text($('ver'), s.version); text($('cap'), fmt(s.starting_balance) + ' USDC');
+  text($('k-eq'), fmt(s.equity));
+  text($('k-day'), signed(s.daily_pnl), 'v ' + (s.daily_pnl > 0 ? 'pos' : s.daily_pnl < 0 ? 'neg' : ''));
+  text($('k-trades'), s.trades_total);
+  text($('l-pos'), s.limits.max_position_pct + ' %');
+  text($('l-exp'), s.limits.max_total_exposure_pct + ' %');
+  text($('l-loss'), fmt(s.daily_loss_pct) + ' % / ' + s.limits.max_daily_loss_pct + ' %');
+  const used = Math.min(100, s.daily_loss_pct / s.limits.max_daily_loss_pct * 100);
+  const bar = $('loss-bar'); bar.style.width = used + '%'; bar.style.background = used > 75 ? 'var(--red)' : used > 40 ? 'var(--orange)' : 'var(--green)';
+  text($('ks-state'), s.kill_switch ? 'KILL SWITCH AKTIV' : 'NORMAL', s.kill_switch ? 'no' : 'ok');
+  pill('p-risk', s.kill_switch ? 'Orders blockiert' : 'Risk normal', s.kill_switch ? 'r' : 'g');
+  $('ks-on').disabled = s.kill_switch; $('ks-off').disabled = !s.kill_switch;
+}
+
+async function loadHealth() {
+  const { body: h } = await j('/api/health');
+  pill('p-health', h.status === 'healthy' ? 'Healthy' : 'Degraded', h.status === 'healthy' ? 'g' : 'o');
+  const rows = [
+    ['Datenbank', h.database], ['Risk Engine', h.risk_engine], ['Paper Engine', h.paper_engine],
+    ['Marktdaten', h.market_data], ['Speicher frei', h.disk_free_gb + ' GB'], ['Uptime', Math.floor(h.uptime_s / 3600) + ' h ' + Math.floor(h.uptime_s % 3600 / 60) + ' min'],
+  ];
+  const box = $('health'); box.replaceChildren();
+  for (const [k, v] of rows) {
+    const d = document.createElement('div'); const a = document.createElement('span'); const b = document.createElement('b');
+    a.textContent = k; b.textContent = v; b.className = v === 'ok' ? 'ok' : v === 'error' || v === 'low' ? 'no' : '';
+    d.append(a, b); box.append(d);
+  }
+}
+
+async function loadDecisions() {
+  const { body: rows } = await j('/api/decisions?limit=100');
+  text($('dj-count'), rows.length + ' Einträge');
+  const tb = $('dj'); tb.replaceChildren();
+  for (const r of rows) {
+    const tr = document.createElement('tr');
+    cell(tr, r.ts.replace('T', ' ').replace('Z', ''), 'r');
+    cell(tr, r.symbol);
+    const tag = document.createElement('span'); tag.className = 'tag ' + r.action; tag.textContent = r.action; cell(tr, tag);
+    cell(tr, r.requested_position_pct ? r.requested_position_pct + ' %' : '–', 'r');
+    cell(tr, r.confidence != null ? Math.round(r.confidence) + ' %' : '–', 'r');
+    cell(tr, (r.approved ? '✓ ' : '✕ ') + (r.risk_code || ''), r.approved ? 'ok r' : 'no r');
+    cell(tr, r.reason + (r.approved ? '' : ' — ' + (r.risk_reason || '')));
+    tb.append(tr);
+  }
+}
+
+async function loadEvents() {
+  const { body: rows } = await j('/api/events?limit=60');
+  const box = $('events'); box.replaceChildren();
+  for (const e of rows) {
+    const d = document.createElement('div'); d.className = e.severity;
+    d.textContent = `${e.ts}  ${e.component.padEnd(12)} ${e.severity.padEnd(5)} ${e.event}${e.detail ? '  ' + e.detail : ''}`;
+    box.append(d);
+  }
+}
+
+async function refresh() {
+  text($('clock'), new Date().toLocaleString('de-DE'));
+  await Promise.allSettled([loadStatus(), loadHealth(), loadDecisions(), loadEvents()]);
+}
+
+$('ks-on').addEventListener('click', async () => {
+  if (!confirm('Kill Switch aktivieren? Alle neuen Orders werden blockiert.')) return;
+  const r = await j('/api/kill-switch/engage', { method: 'POST' });
+  toast(r.ok ? 'Kill Switch aktiv' : 'Fehler'); refresh();
+});
+$('ks-off').addEventListener('click', async () => {
+  const token = prompt('Admin-Token zum Freigeben:');
+  if (!token) return;
+  const r = await j('/api/kill-switch/release', { method: 'POST', headers: { 'X-Admin-Token': token } });
+  toast(r.ok ? 'Freigegeben' : 'Token falsch – nicht freigegeben'); refresh();
+});
+
+refresh();
+setInterval(refresh, 10000);
+</script>
+</body>
+</html>
