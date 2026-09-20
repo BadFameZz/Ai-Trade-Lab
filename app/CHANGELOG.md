@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.2.1 – 2026-09-20
+- Erste Installation auf echter Proxmox-Hardware gelaufen (CT 107, Debian 13, healthy)
+- Installer nennt am Ende `pct enter <CTID>`: der Container hat kein Root-Passwort,
+  die Konsole im Webinterface fragt sonst nach einem Login, den es nicht gibt
+- Installer warnt am Ende, wenn der Container eine global routbare IPv6-Adresse
+  bekommen hat — auf einem Dashboard ohne Login die gefährlichste Überraschung
+- README: IPv6-Abschnitt samt Prüfbefehl und Gegenprobe
+- Keine Änderung an der App selbst
+
 ## 0.2.0 – 2026-09-20
 - Persistenz: SQLite (WAL) mit versionierten Migrationen unter `data/aitra.db`
 - Decision Journal wird dauerhaft gespeichert, inkl. Ergebnis der Risk Engine

@@ -567,10 +567,26 @@ finish() {
     "Kapital"   "100 USDC virtuell"
   printf '\n  %sAdmin-Token (zum Freigeben des Kill Switch):%s\n' "$D" "$N"
   printf '    pct exec %s -- grep ADMIN_TOKEN %s/.env\n\n' "$CTID" "$APP_DIR"
+  # Die Shell-Zeile steht bewusst zuerst: der Container hat kein Root-Passwort,
+  # die Konsole im Webinterface fragt also nach einem Login, den es nicht gibt.
+  printf '  %sShell%s       pct enter %s\n' "$D" "$N" "$CTID"
   printf '  %sUpdate%s      bash %s --update %s\n' "$D" "$N" "$(basename "$SCRIPT_PATH")" "$CTID"
   printf '  %sBackup%s      vzdump %s --mode snapshot\n' "$D" "$N" "$CTID"
   printf '  %sApp-Logs%s    pct exec %s -- docker logs --tail 50 ai-trade-lab\n' "$D" "$N" "$CTID"
-  printf '  %sProtokoll%s   %s\n\n' "$D" "$N" "$LOG"
+  printf '  %sProtokoll%s   %s\n' "$D" "$N" "$LOG"
+
+  # Bei einem Dual-Stack-Anschluss bekommt der Container automatisch eine
+  # global routbare IPv6-Adresse. Auf einem Dashboard ohne Login ist das die
+  # gefährlichste Überraschung der ganzen Installation – deshalb hier und
+  # nicht nur in der README.
+  local ip6; ip6="$(in_ct_out "hostname -I | tr ' ' '\n' | grep -E '^2[0-9a-fA-F]{3}:' | head -n1" || true)"
+  if [[ -n "$ip6" ]]; then
+    printf '\n  %s!%s  Der Container hat auch eine globale IPv6-Adresse:\n' "$Y" "$N"
+    printf '      %s\n' "$ip6"
+    printf '      Das Dashboard hat keinen Login. Prüfe vom Mobilfunk aus (WLAN aus),\n'
+    printf '      ob es von außen erreichbar ist:  http://[%s]:%s\n' "$ip6" "$APP_PORT"
+  fi
+  printf '\n'
 }
 
 # ── Update mit Backup + Rollback ─────────────────────────────────────────────

@@ -1,4 +1,4 @@
-# AI Trade Lab (Aitra) – v0.2.0 · privat
+# AI Trade Lab (Aitra) – v0.2.1
 
 Privates Paper-Trading-Labor. Läuft in einem eigenen Debian-LXC auf Proxmox,
 komplett lokal – ohne Cloud-Dienste, ohne sylvron.de. Der Quellcode liegt in
@@ -38,6 +38,12 @@ Daten (`data/`) und `.env` bleiben erhalten. Die letzten 5 Backups liegen im CT 
   (`pct exec <CTID> -- grep ADMIN_TOKEN /opt/ai-trade-lab/.env`)
 - Container: Nicht-root, read-only, keine Capabilities, kein Zugriff auf den Proxmox-Host
 - Das Dashboard hat **keinen Login** → nur im Heimnetz betreiben, keinen Port nach außen freigeben
+- **Achtung IPv6:** An einem Dual-Stack-Anschluss bekommt der Container zusätzlich zur
+  `192.168.x.y` automatisch eine global routbare IPv6-Adresse — und die ist, anders als die
+  private IPv4, potenziell aus dem Internet erreichbar. Der Installer zeigt sie am Ende an.
+  Prüfen vom Mobilfunk aus, mit ausgeschaltetem WLAN:
+  `http://[DEINE-IPV6]:8787` — lädt dort nichts, blockt der Router. Gegenprobe, ob das Handy
+  überhaupt IPv6 hat: test-ipv6.com. Ein negativer Test ohne IPv6 beweist nichts.
 
 ## API
 
