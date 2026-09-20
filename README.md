@@ -1,7 +1,8 @@
 # AI Trade Lab (Aitra) – v0.2.0 · privat
 
 Privates Paper-Trading-Labor. Läuft in einem eigenen Debian-LXC auf Proxmox,
-komplett lokal, ohne GitHub, ohne sylvron.de, ohne Cloud.
+komplett lokal – ohne Cloud-Dienste, ohne sylvron.de. Der Quellcode liegt in
+einem privaten GitHub-Repo; im Betrieb ruft die App nichts davon ab.
 
 > Kein Trading-Bot mit Gewinngarantie. Aktuell: Dashboard, Persistenz, Risk Engine,
 > Kill Switch, Health. Marktdaten, Paper-Ledger und Strategien folgen (Phase 2+).
