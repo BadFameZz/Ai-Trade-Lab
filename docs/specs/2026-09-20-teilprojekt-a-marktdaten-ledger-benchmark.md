@@ -859,9 +859,17 @@ sowie `max(rest)/1000 < 0.001` (= 0,1 %, der Wert aus K-2).
 > im Feld her (Preis 80.787, der niedrigste der 1.000 Stichproben), davon die Hälfte, weil das
 > Rundungsverhalten über den Preisbereich nicht garantiert monoton auf das Maximum läuft. Das
 > ist **43 % schwächer** als die hier genannten 0,70. Gemessen im Container liegt `max(rest)`
-> bei **0,81324** USDC — innerhalb beider Schranken (`0,403935 < 0,81324 < 0,8129`), die
-> Obergrenze `0,8129` bleibt unverändert und gilt weiterhin für jede Stichprobe einzeln
-> (`max_allowed = step_size * fill.price`), nicht nur am Maximum.
+> bei **0,81324** USDC.
+>
+> **Zweite Korrektur (Orchestrator, von Hand nachgerechnet):** Die Obergrenze `0,8129` oben
+> ist als *feste* Zahl falsch — sie ist `step_size · 81287`, gerechnet am Referenzpreis. Die
+> 1.000 Stichproben laufen aber über den Bereich 80.787 bis 81.786, wo die Schranke zwischen
+> `0,80787` und `0,81786` liegt. Der gemessene Wert `0,81324` ist deshalb **größer** als
+> `0,8129` und trotzdem korrekt: er unterschreitet die Schranke *seiner eigenen* Stichprobe.
+> Eine frühere Fassung dieses Absatzes behauptete `0,403935 < 0,81324 < 0,8129` — arithmetisch
+> falsch. Was der Test tatsächlich durchsetzt, ist je Stichprobe `0 ≤ rest < step_size · preis`
+> (`test_sizing.py`), plus die hergeleitete Untergrenze am Maximum. Eine feste Obergrenze über
+> einen Preisbereich hinweg kann es nicht geben; genau deshalb prüft der Test je Stichprobe.
 >
 > Abnahmebefehl: `python -m pytest -q tests/test_sizing.py::test_a5_losgroessenverlust_ist_beziffert`
 
