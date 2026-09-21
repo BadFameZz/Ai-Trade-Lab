@@ -327,6 +327,10 @@ Das ist in **E-008** festgehalten und wird von Kriterium A-12b gemessen.
 ## 5. Datenmodell
 
 Neue Migration als **Index 1** der Liste `MIGRATIONS` in `db.py` → Schema-Version **2**.
+*Nachtrag Fix-Welle A1:* Dazu kommt **Migration 3** (Index 2) → Schema-Version **3**:
+`ALTER TABLE decisions ADD COLUMN pending_ref_price TEXT`. Sie speichert den zum
+Vorschlagszeitpunkt gültigen Referenzpreis an der schwebenden Entscheidung, damit
+`resolve_pending()` die Order nicht gegen die Füllkerze bemisst (E-001, siehe 9.1).
 Bestehende Tabellen bleiben unverändert, `decisions` bekommt drei nullbare Spalten per
 `ALTER TABLE ADD COLUMN` (SQLite-tauglich, Bestandszeilen erhalten NULL).
 
@@ -954,8 +958,9 @@ Differenz zum gespeicherten `positions`-Schnappschuss und zur `cash_after` der l
 Differenz beim ersten Nachkauf.
 
 **A-15 · Migration verliert nichts.**
-Eine DB auf `schema_version = 1` mit 3 Zeilen in `decisions` wird auf Version 2 gehoben.
-Danach: `schema_version == 2`, `count(decisions) == 3`, und ein SHA-256 über die sortierten
+Eine DB auf `schema_version = 1` mit 3 Zeilen in `decisions` wird auf die aktuelle Version gehoben.
+Danach: `schema_version == 3` *(Fix-Welle A1: war 2, bis Migration 3 dazukam)*,
+`count(decisions) == 3`, und ein SHA-256 über die sortierten
 Zeileninhalte (ohne die drei neuen Spalten) ist **identisch** zu vorher.
 *Rot:* `DROP TABLE decisions` in der Migration → 0 Zeilen.
 

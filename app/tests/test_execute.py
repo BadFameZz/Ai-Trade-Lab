@@ -303,3 +303,69 @@ def test_a14_rekonstruktion_aus_dem_journal_1000_fills(tmp_path):
     assert qty - positions["BTCUSDC"]["qty"] == Decimal("0")
     assert avg_price - positions["BTCUSDC"]["avg_price"] == Decimal("0")
     assert cash - fills[-1]["cash_after"] == Decimal("0")
+
+
+def test_resolve_pending_bemisst_mit_dem_ref_price_des_vorschlags(tmp_path):
+    """Fix-Welle, Review-Befund 3 — Spion analog test_benchmark.py.
+
+    resolve_pending() bemass die Order mit ref_price=candle.open, also mit dem
+    Fuellpreis selbst. Dasselbe Muster wurde in benchmark.py bereits als
+    Critical zurueckgenommen; im Livepfad stand es unveraendert. Ergebnis waere
+    gewesen: Replay bemisst gegen current.close, live gegen candle.open — zwei
+    verschiedene Mengen fuer dieselbe Entscheidung, entgegen E-001, und A-8
+    (eine Quelle, ein Hash) in Teilprojekt A2 unerreichbar.
+
+    Die Fuellkerze traegt hier bewusst einen ganz anderen Preis (99.999) als
+    der Vorschlag (81.287,03), damit eine Verwechslung sofort auffaellt.
+    """
+    ctx = _ctx(tmp_path)
+    ref = Decimal("81287.03")
+    pending = execute_proposal(
+        Proposal("BTCUSDC", "BUY", 8), ctx, marks={}, ts_ms=900_000, ref_price=ref,
+        start_of_day_equity=Decimal("10000"), next_candle=None,
+    )
+    assert pending.status == "pending_fill"
+    # Migration 3: der Vorschlagspreis steht kanonisch als TEXT in der Zeile (E-007)
+    row = ctx.conn.execute("SELECT pending_ref_price FROM decisions WHERE id=?",
+                            (pending.decision_id,)).fetchone()
+    assert row["pending_ref_price"] == "81287.03000000"
+
+    fuellkerze = _candle(1_800_000, "99999.00")
+    captured: dict = {}
+    from aitra.execute import size_order as _real_size_order
+
+    def spy(*args, **kwargs):
+        captured["ref_price"] = args[3]  # 4. Positionsargument von size_order()
+        return _real_size_order(*args, **kwargs)
+
+    with patch("aitra.execute.size_order", side_effect=spy):
+        fills = resolve_pending(ctx, fuellkerze)
+
+    assert len(fills) == 1  # Pruefflaeche: der Spion muss einen echten Fill gesehen haben
+    assert captured["ref_price"] == ref
+    assert captured["ref_price"] != fuellkerze.open
+    # Gefuellt wird trotzdem zum Preis der Folgekerze (E-006) — nur bemessen
+    # wurde mit dem Vorschlagspreis.
+    assert fills[0].candle_open_time == 1_800_000
+    assert fills[0].price > fuellkerze.open  # 99.999 + Slippage
+
+
+def test_resolve_pending_verwirft_zeilen_ohne_gespeicherten_ref_price(tmp_path):
+    """Bestandszeilen aus einer DB vor Migration 3 haben pending_ref_price NULL.
+    Mit candle.open weiterzurechnen waere genau der Look-ahead, den Migration 3
+    beseitigt — also verfallen sie, statt still falsch bemessen zu werden."""
+    ctx = _ctx(tmp_path)
+    pending = execute_proposal(
+        Proposal("BTCUSDC", "BUY", 8), ctx, marks={}, ts_ms=900_000,
+        ref_price=Decimal("81287.03"), start_of_day_equity=Decimal("10000"), next_candle=None,
+    )
+    ctx.conn.execute("UPDATE decisions SET pending_ref_price = NULL WHERE id = ?",
+                      (pending.decision_id,))
+    ctx.conn.commit()
+
+    assert resolve_pending(ctx, _candle(1_800_000)) == []
+    assert ctx.conn.execute("SELECT COUNT(*) c FROM fills").fetchone()["c"] == 0
+    row = ctx.conn.execute("SELECT risk_code, pending_since_ms FROM decisions WHERE id=?",
+                            (pending.decision_id,)).fetchone()
+    assert row["risk_code"] == "PENDING_EXPIRED"
+    assert row["pending_since_ms"] is None

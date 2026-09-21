@@ -93,14 +93,20 @@ def test_pending_decision_lebenszyklus(tmp_path):
     conn = _conn(tmp_path)
     did = db.add_decision(conn, symbol="BTCUSDC", action="BUY", reason="test", approved=1,
                            requested_position_pct=8)
-    store.mark_decision_pending(conn, did, pending_since_ms=1_000)
+    store.mark_decision_pending(conn, did, pending_since_ms=1_000, ref_price=Decimal("81287.03"))
     pending = store.get_pending_decisions(conn)
     assert len(pending) == 1
     assert pending[0]["id"] == did
+    # Migration 3: der Vorschlagspreis liegt kanonisch als TEXT bei (E-007) und
+    # ist beim Aufloesen wieder exakt derselbe Decimal.
+    assert pending[0]["pending_ref_price"] == "81287.03000000"
+    assert money.from_text(pending[0]["pending_ref_price"]) == Decimal("81287.03")
     store.resolve_decision(conn, did, fill_id=42)
     assert store.get_pending_decisions(conn) == []
-    row = conn.execute("SELECT fill_id FROM decisions WHERE id=?", (did,)).fetchone()
+    row = conn.execute("SELECT fill_id, pending_ref_price FROM decisions WHERE id=?",
+                        (did,)).fetchone()
     assert row["fill_id"] == 42
+    assert row["pending_ref_price"] is None  # mit dem Fill aufgeraeumt
 
 
 def test_symbol_spec_roundtrip(tmp_path):
@@ -164,12 +170,13 @@ def test_expire_decision_entfernt_aus_pending(tmp_path):
     conn = _conn(tmp_path)
     did = db.add_decision(conn, symbol="BTCUSDC", action="BUY", reason="test", approved=1,
                            requested_position_pct=8)
-    store.mark_decision_pending(conn, did, pending_since_ms=1_000)
+    store.mark_decision_pending(conn, did, pending_since_ms=1_000, ref_price=Decimal("81287.03"))
     assert len(store.get_pending_decisions(conn)) == 1
     store.expire_decision(conn, did)
     assert store.get_pending_decisions(conn) == []
     row = conn.execute(
-        "SELECT pending_since_ms, risk_code FROM decisions WHERE id = ?", (did,)
+        "SELECT pending_since_ms, pending_ref_price, risk_code FROM decisions WHERE id = ?", (did,)
     ).fetchone()
     assert row["pending_since_ms"] is None
+    assert row["pending_ref_price"] is None
     assert row["risk_code"] == "PENDING_EXPIRED"

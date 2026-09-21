@@ -112,7 +112,7 @@ def execute_proposal(
 
     if next_candle is None:
         # E-006, live: Folgekerze liegt noch nicht vor -> schwebend
-        store.mark_decision_pending(ctx.conn, decision_id, pending_since_ms=ts_ms)
+        store.mark_decision_pending(ctx.conn, decision_id, pending_since_ms=ts_ms, ref_price=ref_price)
         return ExecutionResult(decision_id, True, "OK", "Order schwebt bis zur Folgekerze", status="pending_fill")
 
     fill = ctx.ledger.apply(order, next_candle)
@@ -124,7 +124,15 @@ def execute_proposal(
 
 
 def resolve_pending(ctx: ExecutionContext, candle: Candle) -> list[Fill]:
-    """Fuellt schwebende Vorschlaege fuer candle.symbol mit der nun vorliegenden Kerze."""
+    """Fuellt schwebende Vorschlaege fuer candle.symbol mit der nun vorliegenden Kerze.
+
+    Bemessen wird mit dem beim Vorschlag gespeicherten pending_ref_price, nicht
+    mit candle.open: candle.open IST der Fuellpreis, und wer die Menge gegen den
+    Fuellpreis bemisst, laesst die Entscheidung den eigenen Ausgang kennen.
+    Genau dieses Muster wurde in benchmark.py bereits als Critical
+    zurueckgenommen. Replay bemisst gegen current.close; nur mit dem
+    gespeicherten ref_price liefern live und Replay dieselbe Menge (E-001).
+    """
     expire_stale_pending(ctx)
     filled: list[Fill] = []
     for row in store.get_pending_decisions(ctx.conn, ctx.run_id):
@@ -134,11 +142,19 @@ def resolve_pending(ctx: ExecutionContext, candle: Candle) -> list[Fill]:
         if spec is None:
             store.expire_decision(ctx.conn, row["id"])
             continue
+        roh_ref = row["pending_ref_price"]
+        if roh_ref is None:
+            # Zeile aus einer DB vor Migration 3: der Vorschlagspreis fehlt.
+            # Verwerfen ist richtig — mit candle.open weiterzurechnen waere
+            # genau der Look-ahead, den Migration 3 beseitigt.
+            store.expire_decision(ctx.conn, row["id"])
+            continue
+        ref_price = money.from_text(roh_ref)
         held = ctx.ledger.position(row["symbol"]).qty
         proposal = Proposal(symbol=row["symbol"], action=row["action"],
                              position_pct=row["requested_position_pct"] or 0.0)
         valuation = ctx.ledger.mark({row["symbol"]: candle.open}, ts_ms=ctx.clock.now_ms())
-        order = size_order(proposal, valuation, spec, candle.open, ctx.fee_bps, ctx.slippage_bps, held)
+        order = size_order(proposal, valuation, spec, ref_price, ctx.fee_bps, ctx.slippage_bps, held)
         if isinstance(order, Rejection):
             store.expire_decision(ctx.conn, row["id"])
             continue

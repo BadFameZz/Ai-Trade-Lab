@@ -227,14 +227,27 @@ def get_equity_curve(conn: sqlite3.Connection, run_id: str, limit: int = 500) ->
     return out
 
 
-def mark_decision_pending(conn: sqlite3.Connection, decision_id: int, pending_since_ms: int) -> None:
-    conn.execute("UPDATE decisions SET pending_since_ms = ? WHERE id = ?", (pending_since_ms, decision_id))
+def mark_decision_pending(conn: sqlite3.Connection, decision_id: int, pending_since_ms: int,
+                           ref_price: Decimal) -> None:
+    """Legt einen genehmigten Vorschlag schwebend ab (E-006).
+
+    ref_price ist der zum *Vorschlagszeitpunkt* gueltige Referenzpreis. Er wird
+    mitgespeichert, weil resolve_pending() die Order sonst gegen die Fuellkerze
+    bemisst — also gegen einen Preis, den die Entscheidung noch nicht kennen
+    konnte. Replay bemisst gegen current.close; ohne diese Spalte lieferten live
+    und Replay verschiedene Mengen (E-001).
+    """
+    conn.execute(
+        "UPDATE decisions SET pending_since_ms = ?, pending_ref_price = ? WHERE id = ?",
+        (pending_since_ms, money.to_text(ref_price, DP), decision_id),
+    )
     conn.commit()
 
 
 def resolve_decision(conn: sqlite3.Connection, decision_id: int, fill_id: int) -> None:
     conn.execute(
-        "UPDATE decisions SET fill_id = ?, pending_since_ms = NULL WHERE id = ?",
+        "UPDATE decisions SET fill_id = ?, pending_since_ms = NULL, pending_ref_price = NULL "
+        "WHERE id = ?",
         (fill_id, decision_id),
     )
     conn.commit()
@@ -242,7 +255,8 @@ def resolve_decision(conn: sqlite3.Connection, decision_id: int, fill_id: int) -
 
 def expire_decision(conn: sqlite3.Connection, decision_id: int) -> None:
     conn.execute(
-        "UPDATE decisions SET pending_since_ms = NULL, risk_code = 'PENDING_EXPIRED' WHERE id = ?",
+        "UPDATE decisions SET pending_since_ms = NULL, pending_ref_price = NULL, "
+        "risk_code = 'PENDING_EXPIRED' WHERE id = ?",
         (decision_id,),
     )
     conn.commit()

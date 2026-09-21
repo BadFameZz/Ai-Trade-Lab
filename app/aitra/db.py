@@ -107,6 +107,16 @@ MIGRATIONS: list[str] = [
     ALTER TABLE decisions ADD COLUMN fill_id INTEGER;
     ALTER TABLE decisions ADD COLUMN pending_since_ms INTEGER;  -- schwebende Vorschläge, E-006
     """,
+    # 3 – ref_price des Vorschlagszeitpunkts an der schwebenden Entscheidung
+    #     Ohne diese Spalte bemisst resolve_pending() die Order gegen die Füllkerze
+    #     (candle.open) und damit gegen den Preis, der erst durch die Füllung
+    #     entsteht. Replay bemisst gegen current.close — zwei verschiedene Mengen
+    #     für dieselbe Entscheidung, entgegen E-001. Geld steht als TEXT (E-007).
+    #     Rücknahme: ALTER TABLE decisions DROP COLUMN pending_ref_price;
+    #     (SQLite ≥ 3.35). Die Spalte ist nullbar, Bestandszeilen bleiben gültig.
+    """
+    ALTER TABLE decisions ADD COLUMN pending_ref_price TEXT;
+    """,
 ]
 
 
