@@ -9,9 +9,21 @@ import logging
 import os
 import secrets
 from dataclasses import dataclass
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
+from urllib.parse import urlsplit
+
+from . import money
 
 log = logging.getLogger("aitra.config")
+
+ALLOWED_BINANCE_HOSTS = frozenset({"api.binance.com", "data-api.binance.vision"})
+
+# Referenzpreis fuer die Schwelle in _narrow_trading_window: BTCUSDC am 2026-09-20
+# (Spec Abschnitt 2.2 / K-3). Ein Marktpreis wuerde die Schwelle staendig verschieben;
+# die Spec verwendet bewusst denselben festen Wert wie K-3.
+_NARROW_WINDOW_REF_PRICE = Decimal("81287.04")
+_NARROW_WINDOW_FACTOR = Decimal(20)
 
 
 class ConfigError(ValueError):
@@ -20,7 +32,7 @@ class ConfigError(ValueError):
 
 @dataclass(frozen=True)
 class Config:
-    starting_balance: float
+    starting_balance: Decimal
     max_position_pct: float
     max_daily_loss_pct: float
     max_total_exposure_pct: float
@@ -28,6 +40,7 @@ class Config:
     admin_token: str
     trading_mode: str = "PAPER"
     live_locked: bool = True
+    binance_base_url: str = "https://api.binance.com"
 
 
 def _num(name: str, default: float, lo: float, hi: float) -> float:
@@ -39,6 +52,52 @@ def _num(name: str, default: float, lo: float, hi: float) -> float:
     if not (lo < val <= hi):
         raise ConfigError(f"{name}={val} liegt außerhalb der erlaubten Grenzen ({lo} < x ≤ {hi})")
     return val
+
+
+def _dec(name: str, default: str, lo: Decimal, hi: Decimal) -> Decimal:
+    """Wie _num, aber ohne den Umweg über float (Befund B-4).
+
+    STARTING_BALANCE=0.1 wird heute (_num) zu 0.1000000000000000055511151231257827,
+    weil float(raw) zuerst bindaer rundet. _dec liest denselben String direkt in
+    Decimal ein und bleibt exakt.
+    """
+    raw = os.getenv(name, default).strip()
+    try:
+        val = money.dec(raw)
+    except (InvalidOperation, ValueError) as e:
+        raise ConfigError(f"{name}={raw!r} ist keine Zahl") from e
+    if not (lo < val <= hi):
+        raise ConfigError(f"{name}={val} liegt außerhalb der erlaubten Grenzen ({lo} < x ≤ {hi})")
+    return val
+
+
+def _binance_base_url(name: str = "BINANCE_BASE_URL", default: str = "https://api.binance.com") -> str:
+    """Nur HTTPS und nur die beiden bekannten Binance-Hosts, exakt verglichen (A-17).
+
+    Ein Praefixvergleich (startswith) wuerde https://api.binance.com.evil.example
+    durchlassen — genau das ist der Rot-Nachweis unten.
+    """
+    raw = os.getenv(name, default).strip()
+    parts = urlsplit(raw)
+    if parts.scheme != "https":
+        raise ConfigError(f"{name}={raw!r} muss https verwenden")
+    if parts.hostname not in ALLOWED_BINANCE_HOSTS:
+        raise ConfigError(f"{name}={raw!r} ist kein erlaubter Binance-Host")
+    return raw
+
+
+def _narrow_trading_window(balance: Decimal, max_position_pct: float) -> bool:
+    """K-1/A-22: Das Fenster ist zu eng, wenn die groesste erlaubte Order nicht
+    mindestens das Zwanzigfache der effektiven Mindestordergroesse (K-3) erreicht.
+
+    balance * max_position_pct/100 >= 20 * effective_min_notional(ref_price)
+    Bei 5,82 USDC (BTCUSDC, 81.287) und 10 % Positionsgroesse liegt die Grenze bei
+    rund 1.164 USDC; in der Doku wird grosszuegig auf 1.200 USDC aufgerundet.
+    """
+    spec = money.BUILTIN_SPECS["BTCUSDC"]
+    eff_min = spec.effective_min_notional(_NARROW_WINDOW_REF_PRICE)
+    largest_order = balance * Decimal(str(max_position_pct)) / Decimal(100)
+    return largest_order < _NARROW_WINDOW_FACTOR * eff_min
 
 
 def _admin_token(data_dir: Path) -> str:
@@ -66,11 +125,23 @@ def load() -> Config:
     if mode != "paper":
         log.warning("TRADING_MODE=%r ignoriert – Live-Trading ist gesperrt, erzwinge PAPER", mode)
 
+    starting_balance = _dec("STARTING_BALANCE", "10000", Decimal(0), Decimal(1_000_000))
+    max_position_pct = _num("MAX_POSITION_PCT", 10, 0, 25)
+    binance_base_url = _binance_base_url()
+
+    if _narrow_trading_window(starting_balance, max_position_pct):
+        log.warning(
+            "NARROW_TRADING_WINDOW: STARTING_BALANCE=%s mit MAX_POSITION_PCT=%s%% "
+            "ergibt ein zu enges Handelsfenster (< 20x der effektiven Mindestordergroesse, K-1)",
+            money.to_text(starting_balance), max_position_pct,
+        )
+
     return Config(
-        starting_balance=_num("STARTING_BALANCE", 100, 0, 1_000_000),
-        max_position_pct=_num("MAX_POSITION_PCT", 10, 0, 25),
+        starting_balance=starting_balance,
+        max_position_pct=max_position_pct,
         max_daily_loss_pct=_num("MAX_DAILY_LOSS_PCT", 2, 0, 10),
         max_total_exposure_pct=_num("MAX_TOTAL_EXPOSURE_PCT", 50, 0, 100),
         data_dir=data_dir,
         admin_token=_admin_token(data_dir),
+        binance_base_url=binance_base_url,
     )
