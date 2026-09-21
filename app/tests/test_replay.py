@@ -446,3 +446,46 @@ def test_cli_lauft_end_to_end(tmp_path):
     )
     assert out.returncode == 0, out.stderr
     assert re.search(r"[0-9a-f]{64}", out.stdout)  # der Hash, den auch A-8c vergleicht
+
+
+def test_replay_schreibt_equity_kurve_und_schliesst_beide_laeufe_ab():
+    """Fix-Welle, Review-Befund 7: store.append_equity_point() und
+    store.finish_run() hatten im gesamten Produktivcode keinen Aufrufer,
+    obwohl Spec 4.4 ("Fills und Equity-Kurve unter eigener run_id") und 9.2
+    ("equity_punkt anhaengen") beides verlangen. Jeder Lauf blieb in
+    runs.finished_at fuer immer offen."""
+    candles = _candles(50)
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+
+    def decide_fn(history):
+        return (Proposal("BTCUSDC", "BUY", position_pct=1) if len(history) % 10 == 0
+                else Proposal("BTCUSDC", "WAIT"))
+
+    result = run_replay(candles, decide_fn, CFG, SPECS, fee_bps=10.0, slippage_bps=5.0,
+                         benchmark_symbol="BTCUSDC", run_id="test-kurve", conn=conn)
+    assert len(result.fills) > 0  # Pruefflaeche: die Kurve muss sich bewegen koennen
+
+    kurve = store.get_equity_curve(conn, "test-kurve", limit=10_000)
+    # Ein Punkt je Schleifendurchlauf, also je Entscheidungskerze candles[0..n-2].
+    assert len(kurve) == len(candles) - 1 == result.decisions
+    assert [punkt["ts_ms"] for punkt in kurve] == [c.close_time for c in candles[:-1]]
+    assert all(punkt["benchmark_equity"] is not None for punkt in kurve)
+
+    # Die Kurve steht nicht still: nach dem ersten Kauf sinkt die Kasse und die
+    # Position traegt Risiko.
+    assert kurve[0]["cash"] == Decimal("10000")
+    assert kurve[0]["exposure_pct"] == 0.0
+    assert kurve[-1]["cash"] < Decimal("10000")
+    assert kurve[-1]["exposure_pct"] > 0.0
+    # Geld steht auch hier als TEXT in der Datenbank (E-007/A-13).
+    typen = conn.execute(
+        "SELECT DISTINCT typeof(equity), typeof(cash), typeof(benchmark_equity) FROM equity_curve"
+    ).fetchall()
+    assert [tuple(r) for r in typen] == [("text", "text", "text")]
+
+    # Beide Laeufe sind abgeschlossen (Spec 9.2).
+    laeufe = {r["run_id"]: r["finished_at"]
+              for r in conn.execute("SELECT run_id, finished_at FROM runs").fetchall()}
+    assert set(laeufe) == {"test-kurve", "bench-test-kurve"}
+    assert all(wert is not None for wert in laeufe.values()), laeufe

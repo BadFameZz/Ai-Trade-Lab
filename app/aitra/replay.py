@@ -95,11 +95,12 @@ def run_replay(
             kill_switch_local = False
             sod_equity = ledger.mark({symbol: current.close}, ts_ms=current.close_time).equity
         ctx.kill_switch = kill_switch_local
+        marks = {symbol: current.close}
 
         proposal = decide_fn(candles[:t])
         decisions += 1
         result = execute_proposal(
-            proposal, ctx, marks={symbol: current.close}, ts_ms=current.close_time,
+            proposal, ctx, marks=marks, ts_ms=current.close_time,
             ref_price=current.close, start_of_day_equity=sod_equity, next_candle=candles[t],
             strategy_version="replay",
         )
@@ -111,9 +112,26 @@ def run_replay(
 
         bench.on_candle(candles[t], current)
 
+        # Spec 4.4 und 9.2: je Kerze ein Punkt der Equity-Kurve, unter der
+        # run_id des Laufs, mit der Benchmark daneben. Ohne diesen Aufruf hatte
+        # store.append_equity_point() im gesamten Produktivcode keinen Aufrufer.
+        v = ledger.mark(marks, ts_ms=current.close_time)
+        store.append_equity_point(
+            conn, run_id=run_id, ts_ms=current.close_time, equity=v.equity, cash=v.cash,
+            benchmark_equity=bench.equity(marks, ts_ms=current.close_time),
+            exposure_pct=v.exposure_pct,
+        )
+
     final_marks = {symbol: candles[-1].close}
     final_equity = ledger.mark(final_marks, ts_ms=candles[-1].close_time).equity
     bench_equity = bench.equity(final_marks, ts_ms=candles[-1].close_time)
+
+    # Spec 9.2: beide Laeufe werden abgeschlossen. Ohne diesen Aufruf hatte
+    # store.finish_run() im gesamten Produktivcode keinen Aufrufer, und jeder
+    # Lauf blieb in runs.finished_at fuer immer offen.
+    abschluss = db.now()
+    store.finish_run(conn, run_id, abschluss)
+    store.finish_run(conn, bench_run_id, abschluss)
 
     if own_conn:
         conn.close()
