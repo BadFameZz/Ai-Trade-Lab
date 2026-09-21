@@ -43,9 +43,7 @@ def create_app(cfg: Config | None = None) -> Flask:
         # sqlite3.Connection aber NICHT - `__exit__` committet/rollt nur die
         # offene Transaktion zurueck, schliesst die Verbindung selbst jedoch nicht
         # (anders als z.B. bei Dateien). Ohne dieses ausdrueckliche close() blieb
-        # die Verbindung fuer die Lebensdauer des Prozesses offen; gemessen in der
-        # Suite (16 create_app()-Aufrufe) waren das allein hier 16 nie geschlossene
-        # Handles.
+        # die Verbindung fuer die Lebensdauer des Prozesses offen.
         init_conn.close()
 
     specs_conn = db.connect(db_path)

@@ -1,6 +1,7 @@
 # app/tests/test_modulgroesse.py
 from __future__ import annotations
 
+import ast
 from pathlib import Path
 
 AITRA = Path(__file__).resolve().parent.parent / "aitra"
@@ -88,18 +89,30 @@ def test_store_und_store_run_sind_wirklich_getrennt():
     assert verirrt == [], f"in store_run.py statt store.py: {verirrt}"
 
 
+def _alle_funktionsnamen(pfad: Path) -> set[str]:
+    """Jeder per `def`/`async def` definierte Name in der Datei, auf JEDER
+    Verschachtelungstiefe - ast.walk() erfasst auch Closures innerhalb einer
+    Funktion (z. B. jede Route in web.py, verschachtelt in create_app()), nicht
+    nur Modulattribute (die ein hasattr()-Check saehe)."""
+    baum = ast.parse(pfad.read_text())
+    return {
+        node.name for node in ast.walk(baum)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+
+
 def test_web_und_dashboard_sind_wirklich_getrennt():
     """Die Naht aus A2/Aufgabe 6 (Ruling des Koordinators, Fixrunde 1 ausdruecklich
     beauftragt): web.py beantwortet HTTP, dashboard.py rechnet die Zahlen aus
     (build_live_ledger, last_prices, build_status, build_health).
 
-    Nicht nur 'dashboard.py hat die Funktionen', sondern auch: sie duerfen nicht
-    ZUSAETZLICH in web.py auftauchen. Ein hasattr()-Check allein wuerde eine
-    Doppelung als verschachtelte Closure innerhalb von create_app() nicht sehen -
-    Closures sind keine Modulattribute -, deshalb zusaetzlich ein Text-Scan von
-    web.py auf 'def <name>('. Rot-Nachweis (Fixrunde 1): eine tote Kopie von
-    build_live_ledger() zusaetzlich in web.py definiert liess die volle Suite
-    unveraendert gruen - dieser Test faengt genau das jetzt ab.
+    Fixrunde 2 (Reviewer-Befund): der urspruengliche Waechter prüfte nur EINE
+    Richtung (die vier bekannten dashboard-Namen nicht zusaetzlich in web.py) -
+    eine zusaetzliche web.py-Funktion (der Reviewer nahm `market_candles`) in
+    dashboard.py blieb unbemerkt gruen. Jetzt symmetrisch und ohne gepflegte
+    Namensliste: KEIN per `def` definierter Name, gleich auf welcher
+    Verschachtelungstiefe, darf in beiden Dateien vorkommen. Rot-Nachweis in
+    beide Richtungen im Bericht dokumentiert.
     """
     from aitra import dashboard, web
 
@@ -107,6 +120,9 @@ def test_web_und_dashboard_sind_wirklich_getrennt():
     fehlend = [n for n in namen if not hasattr(dashboard, n)]
     assert fehlend == [], f"fehlt in dashboard.py: {fehlend}"
 
-    web_text = Path(web.__file__).read_text()
-    verirrt = [n for n in namen if f"def {n}(" in web_text]
-    assert verirrt == [], f"zusaetzlich in web.py definiert statt nur in dashboard.py: {verirrt}"
+    web_namen = _alle_funktionsnamen(Path(web.__file__))
+    dashboard_namen = _alle_funktionsnamen(Path(dashboard.__file__))
+    ueberschneidung = web_namen & dashboard_namen
+    assert ueberschneidung == set(), (
+        f"Funktionsnamen in web.py UND dashboard.py definiert: {sorted(ueberschneidung)}"
+    )

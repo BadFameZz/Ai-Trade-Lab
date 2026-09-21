@@ -191,17 +191,39 @@ def test_equity_curve_endpoint(client, app):
     assert body["points"][0]["benchmark"] == "10050.00000000"
 
 
-_GELD_TEXT = re.compile(r"-?\d+\.\d{8}$")
+# Fixrunde 2, Punkt 1 (Koordinator/Reviewer): die vorherige Fassung klapperte eine
+# fest eingetragene Feldliste ab und blieb bei jedem NEUEN rohen Feld (der Reviewer
+# ergaenzte reserve_quote roh und der Test blieb gruen) unbemerkt gruen - selbst eine
+# Momentaufnahme, nur laenger. Jetzt ein rekursiver Scan der GESAMTEN Antwort: jeder
+# Zeichenkettenwert, der sich als Dezimalzahl LESEN LAESST (Ziffern, optional Punkt +
+# Nachkommastellen, optional Exponent), muss in kanonischer Form stehen (money.to_text,
+# exakt 8 Nachkommastellen). Versions-/Modus-/Symbolstrings wie "0.3.0", "PAPER",
+# "BTCUSDC" lesen sich nicht als EINE Zahl und fallen automatisch heraus (kein
+# Ausnahmefeld noetig). Prozentsaetze und Zeitstempel sind JSON-Zahlen (kein str)
+# und werden vom Scan nie betrachtet, weil er nur str-Werte prueft.
+_LIEST_SICH_ALS_ZAHL = re.compile(r"^-?\d+(\.\d+)?([eE][+-]?\d+)?$")
+_KANONISCHE_GELDFORM = re.compile(r"^-?\d+\.\d{8}$")
+
+
+def _finde_nicht_kanonische_zahlenstrings(wert, pfad="status"):
+    """Geht rekursiv durch dicts/Listen und meldet jeden Zeichenkettenwert, der
+    sich als Zahl liest, aber nicht die kanonische 8-Nachkommastellen-Form hat."""
+    fehler = []
+    if isinstance(wert, dict):
+        for schluessel, teilwert in wert.items():
+            fehler += _finde_nicht_kanonische_zahlenstrings(teilwert, f"{pfad}.{schluessel}")
+    elif isinstance(wert, list):
+        for i, teilwert in enumerate(wert):
+            fehler += _finde_nicht_kanonische_zahlenstrings(teilwert, f"{pfad}[{i}]")
+    elif isinstance(wert, str):
+        if _LIEST_SICH_ALS_ZAHL.match(wert) and not _KANONISCHE_GELDFORM.match(wert):
+            fehler.append(f"{pfad} = {wert!r} liest sich als Zahl, ist aber nicht kanonisch")
+    return fehler
 
 
 def test_alle_geldfelder_in_status_sind_kanonischer_text(client, app):
-    """Wurzelbehebung, Fixrunde 1 Punkt 2 (Koordinator/Reviewer): Einzelpruefungen
-    hatten bereits equity/pnl/daily_pnl (Kernarbeit dieser Aufgabe) und dann noch
-    starting_balance (vom Reviewer gefunden, im selben Antwortkoerper) uebersehen
-    - beide Male, weil kein Test die FORM aller Geldfelder auf einmal prueft.
-    Statt eines fuenften Einzelfeldtests: jedes Geldfeld von /api/status generisch
-    gegen die kanonische Form (money.to_text, 8 Nachkommastellen, als Zeichenkette)
-    geprueft."""
+    """Rekursiver Formscan der gesamten /api/status-Antwort (siehe Modulkopf-
+    Kommentar zu _finde_nicht_kanonische_zahlenstrings fuer die Regel/Begruendung)."""
     _mit_marktdaten(app)
     conn = db.connect(app.config["AITRA"].data_dir / "aitra.db")
     store_run.ensure_run(conn, "live", "live", db.now(), "0.3.0")
@@ -220,17 +242,11 @@ def test_alle_geldfelder_in_status_sind_kanonischer_text(client, app):
     conn.close()
 
     s = client.get("/api/status").get_json()
-    for feld in ("equity", "cash", "starting_balance", "pnl", "daily_pnl"):
-        assert isinstance(s[feld], str), f"{feld} ist keine Zeichenkette (E-007): {s[feld]!r}"
-        assert _GELD_TEXT.match(s[feld]), f"{feld} nicht kanonisch (money.to_text): {s[feld]!r}"
-
     assert len(s["positions"]) == 1, "Pruefflaeche: Positionsliste darf hier nicht leer sein"
-    for feld in ("qty", "avg_price", "realized_pnl"):
-        wert = s["positions"][0][feld]
-        assert isinstance(wert, str) and _GELD_TEXT.match(wert), f"positions[0].{feld}: {wert!r}"
-
     assert s["benchmark"]["equity"] is not None, "Pruefflaeche: benchmark.equity darf hier nicht None sein"
-    assert _GELD_TEXT.match(s["benchmark"]["equity"]), f"benchmark.equity: {s['benchmark']['equity']!r}"
+
+    fehler = _finde_nicht_kanonische_zahlenstrings(s)
+    assert fehler == [], "Nicht-kanonische Zahl(en) als Zeichenkette in /api/status:\n" + "\n".join(fehler)
 
 
 def test_create_app_schliesst_alle_eigenen_verbindungen(tmp_path, monkeypatch):
