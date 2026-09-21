@@ -1,0 +1,314 @@
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+import re
+import sqlite3
+import subprocess
+import sys
+import tracemalloc
+from decimal import Decimal
+from pathlib import Path
+
+import pytest
+
+from aitra import db, money, store
+from aitra.config import Config
+from aitra.execute import ExecutionContext, execute_proposal
+from aitra.ledger import Ledger
+from aitra.marketdata import Candle, ListSource, SimClock, SqliteSource
+from aitra.replay import ReplayResult, run_replay
+from aitra.risk import Proposal, RiskEngine
+
+from test_execute import _install_apply_guard
+
+BTC = money.BUILTIN_SPECS["BTCUSDC"]
+SPECS = {"BTCUSDC": BTC}
+CFG = Config(Decimal("10000"), 10, 2, 50, Path("/tmp"), "x" * 32)
+
+
+def _candles(n: int, start_price: str = "81287.03", step_ms: int = 900_000) -> list[Candle]:
+    out = []
+    price = Decimal(start_price)
+    for i in range(n):
+        p = price + Decimal(i % 97) * Decimal("0.01")
+        out.append(Candle(symbol="BTCUSDC", interval="15m", open_time=i * step_ms,
+                           close_time=i * step_ms + step_ms - 1, open=p, high=p, low=p, close=p,
+                           volume=Decimal("1"), closed=True))
+    return out
+
+
+def _wait_fn(history):
+    return Proposal(history[-1].symbol, "WAIT")
+
+
+def _hash_fills(fills) -> str:
+    payload = json.dumps(
+        [[f.symbol, f.side, str(f.price), str(f.qty), str(f.gross_quote), str(f.fee),
+          str(f.net_quote), str(f.cash_after), f.candle_open_time, f.fee_bps, f.slippage_bps]
+         for f in fills],
+        sort_keys=True,
+    )
+    return hashlib.sha256(payload.encode()).hexdigest()
+
+
+def test_a7_decide_fn_sieht_nie_die_fuellkerze():
+    """A-7: 90 Tage 15m = 8.640 Kerzen. history[-1].open_time ist immer genau eine
+    Kerze vor der aktuellen; jeder Fill landet auf open_time + 900_000."""
+    candles = _candles(8640)
+    aufrufe = []
+
+    def decide_fn(history):
+        aufrufe.append((history[-1].open_time, len(history)))
+        t = len(history)
+        if t % 500 == 0:
+            return Proposal("BTCUSDC", "BUY", position_pct=1)
+        return Proposal("BTCUSDC", "WAIT")
+
+    result = run_replay(candles, decide_fn, CFG, SPECS, fee_bps=10.0, slippage_bps=5.0,
+                         benchmark_symbol="BTCUSDC", run_id="test-a7")
+
+    assert len(aufrufe) == 8639
+    # Wichtig: die Erwartung kommt aus der Aufrufreihenfolge (pos), nicht aus
+    # len(history) selbst -- sonst waere die Pruefung tautologisch und wuerde
+    # jeden Blick in die Zukunft durchwinken (die urspruengliche Fassung aus dem
+    # Plan-Brief hat genau das getan: t = len(history) neu bestimmt und damit
+    # gegen sich selbst statt gegen eine unabhaengige Referenz geprueft; siehe
+    # Rot-Nachweis im Bericht).
+    for pos, (open_time, hist_len) in enumerate(aufrufe, start=1):
+        assert hist_len == pos, f"history hat {hist_len} Kerzen bei Aufruf {pos}, erwartet genau {pos}"
+        assert open_time == candles[pos - 1].open_time
+        assert open_time == (pos - 1) * 900_000
+
+    assert len(result.fills) > 0  # Pruefflaeche darf nicht leer sein
+    for f in result.fills:
+        entscheidungskerze_index = f.candle_open_time // 900_000 - 1
+        assert f.candle_open_time == candles[entscheidungskerze_index].open_time + 900_000
+
+
+def test_a8_list_und_sqlite_quelle_liefern_identische_fills(tmp_path):
+    candles = _candles(500)
+    conn = db.connect(tmp_path / "a.db")
+    db.migrate(conn)
+    store.upsert_candles(conn, [
+        store.CandleRow(symbol=c.symbol, interval=c.interval, open_time=c.open_time,
+                         close_time=c.close_time, open=c.open, high=c.high, low=c.low,
+                         close=c.close, volume=c.volume, source="fixture",
+                         fetched_at="2026-01-01T00:00:00Z")
+        for c in candles
+    ])
+    aus_liste = ListSource(candles).candles("BTCUSDC", "15m", limit=1000)
+    aus_db = SqliteSource(conn).candles("BTCUSDC", "15m", limit=1000)
+
+    def decide_fn(history):
+        t = len(history)
+        if t % 50 == 0:
+            return Proposal("BTCUSDC", "BUY", position_pct=2)
+        if t % 77 == 0:
+            return Proposal("BTCUSDC", "SELL", position_pct=1)
+        return Proposal("BTCUSDC", "WAIT")
+
+    r1 = run_replay(aus_liste, decide_fn, CFG, SPECS, fee_bps=10.0, slippage_bps=5.0,
+                     benchmark_symbol="BTCUSDC", run_id="test-a8-liste")
+    r2 = run_replay(aus_db, decide_fn, CFG, SPECS, fee_bps=10.0, slippage_bps=5.0,
+                     benchmark_symbol="BTCUSDC", run_id="test-a8-db")
+
+    assert len(r1.fills) > 0
+    assert _hash_fills(r1.fills) == _hash_fills(r2.fills)
+
+
+def test_a8c_gleicher_lauf_im_selben_prozess_gleicher_hash():
+    candles = _candles(300)
+
+    def decide_fn(history):
+        t = len(history)
+        return Proposal("BTCUSDC", "BUY", position_pct=1) if t % 40 == 0 else Proposal("BTCUSDC", "WAIT")
+
+    r1 = run_replay(candles, decide_fn, CFG, SPECS, fee_bps=10.0, slippage_bps=5.0,
+                     benchmark_symbol="BTCUSDC", run_id="hash-1")
+    r2 = run_replay(candles, decide_fn, CFG, SPECS, fee_bps=10.0, slippage_bps=5.0,
+                     benchmark_symbol="BTCUSDC", run_id="hash-2")
+    assert len(r1.fills) > 0
+    assert _hash_fills(r1.fills) == _hash_fills(r2.fills)
+
+
+def test_a8c_gleicher_lauf_in_getrennten_prozessen_gleicher_hash(tmp_path):
+    candles = _candles(300)
+    conn = db.connect(tmp_path / "seed.db")
+    db.migrate(conn)
+    store.upsert_candles(conn, [
+        store.CandleRow(symbol=c.symbol, interval=c.interval, open_time=c.open_time,
+                         close_time=c.close_time, open=c.open, high=c.high, low=c.low,
+                         close=c.close, volume=c.volume, source="fixture",
+                         fetched_at="2026-01-01T00:00:00Z")
+        for c in candles
+    ])
+    conn.close()
+    from_iso = "1970-01-01T00:00:00+00:00"
+    to_iso = "1970-01-05T00:00:00+00:00"
+    env_hashes = set()
+    for seed in ("1", "2"):
+        out = subprocess.run(
+            [sys.executable, "-m", "aitra.replay", "--symbol", "BTCUSDC", "--interval", "15m",
+             "--from", from_iso, "--to", to_iso, "--db", str(tmp_path / "seed.db")],
+            cwd=str(Path(__file__).resolve().parent.parent), capture_output=True, text=True,
+            env={**os.environ, "PYTHONHASHSEED": seed, "DATA_DIR": str(tmp_path), "ADMIN_TOKEN": "x" * 32},
+        )
+        assert out.returncode == 0, out.stderr
+        env_hashes.add(out.stdout.strip())
+    assert len(env_hashes) == 1
+
+
+@pytest.mark.slow
+def test_a9_tempo_35040_kerzen_container_schwelle():
+    import time
+    candles = _candles(35_040)
+
+    def decide_fn(history):
+        t = len(history)
+        return Proposal("BTCUSDC", "BUY", position_pct=1) if t % 1000 == 0 else Proposal("BTCUSDC", "WAIT")
+
+    start = time.perf_counter()
+    result = run_replay(candles, decide_fn, CFG, SPECS, fee_bps=10.0, slippage_bps=5.0,
+                         benchmark_symbol="BTCUSDC", run_id="test-a9")
+    elapsed = time.perf_counter() - start
+    assert result.decisions == 35_039
+    assert elapsed < 40.0  # Container-Schwelle (876 Entscheidungen/s); Dev-Schwelle: 12,0 s
+
+
+def test_a10_speicher_35040_kerzen():
+    candles = _candles(35_040)
+
+    def decide_fn(history):
+        t = len(history)
+        return Proposal("BTCUSDC", "BUY", position_pct=1) if t % 1000 == 0 else Proposal("BTCUSDC", "WAIT")
+
+    tracemalloc.start()
+    run_replay(candles, decide_fn, CFG, SPECS, fee_bps=10.0, slippage_bps=5.0,
+               benchmark_symbol="BTCUSDC", run_id="test-a10")
+    _current, peak = tracemalloc.get_traced_memory()
+    tracemalloc.stop()
+    assert peak < 120 * 1024 * 1024
+
+
+def test_a6b_replay_laufzeit_waechter_laesst_run_replay_durch():
+    """A-6b auch im Zeitraffer: run_replay() darf Ledger.apply() nur ueber
+    execute_proposal() ausloesen (execute.py), niemals direkt. Der Laufzeit-
+    Waechter aus test_execute.py wird hier zusaetzlich gegen run_replay()
+    gehalten -- ein direkter replay.py-Aufruf von Ledger.apply() wuerde den
+    Assert im Waechter zum Platzen bringen, bevor der erste Fill entsteht."""
+    candles = _candles(300)
+
+    def decide_fn(history):
+        t = len(history)
+        return Proposal("BTCUSDC", "BUY", position_pct=1) if t % 40 == 0 else Proposal("BTCUSDC", "WAIT")
+
+    with _install_apply_guard():
+        result = run_replay(candles, decide_fn, CFG, SPECS, fee_bps=10.0, slippage_bps=5.0,
+                             benchmark_symbol="BTCUSDC", run_id="test-a6b-replay")
+    assert len(result.fills) > 0  # Pruefflaeche: der Waechter muss echte Buchungen sehen
+
+
+def test_a12_zeitraffer_nutzt_nur_simclock():
+    text = Path(__file__).resolve().parent.parent.joinpath("aitra", "replay.py").read_text()
+    assert "WallClock" not in text
+    assert "staleness(" not in text
+
+
+def test_a12b_tagesverlustlimit_blockiert_nur_den_tag_nicht_den_lauf():
+    """5 Tage (480 Kerzen bei 15m). Ein harter Kurssturz auf Tag 1 loest die
+    Tagesverlustgrenze aus; Tag 2 handelt wieder normal (E-008)."""
+    day_len = 96
+    n = 5 * day_len
+    prices = []
+    for i in range(n):
+        if i < 2:
+            prices.append(Decimal("100"))
+        else:
+            prices.append(Decimal("50"))
+    candles = [
+        Candle(symbol="BTCUSDC", interval="15m", open_time=i * 900_000, close_time=i * 900_000 + 899_999,
+               open=prices[i], high=prices[i], low=prices[i], close=prices[i], volume=Decimal("1"), closed=True)
+        for i in range(n)
+    ]
+
+    def decide_fn(history):
+        t = len(history)
+        if t == 1:
+            return Proposal("BTCUSDC", "BUY", position_pct=100)
+        return Proposal("BTCUSDC", "SELL", position_pct=1)
+
+    permissive_cfg = Config(Decimal("10000"), 100, 2, 100, Path("/tmp"), "x" * 32)
+    result = run_replay(candles, decide_fn, permissive_cfg, SPECS, fee_bps=10.0, slippage_bps=5.0,
+                         benchmark_symbol="BTCUSDC", run_id="test-a12b")
+
+    assert result.kill_switch_engagements == 1
+    tag1_fills = [f for f in result.fills if f.candle_open_time < day_len * 900_000]
+    tag2_fills = [f for f in result.fills if day_len * 900_000 <= f.candle_open_time < 2 * day_len * 900_000]
+    # Nach dem Ausloesen (Kerze 2, Preissturz) darf an Tag 1 kein Verkauf mehr durchgehen:
+    # genau der anfaengliche BUY (Kerze 1) und der eine SELL vor dem Sturz (Kerze 2) zaehlen.
+    assert len(result.fills) >= 3  # die Pruefflaeche darf nicht leer sein
+    assert len(tag1_fills) == 2
+    assert len(tag2_fills) >= 1
+
+
+def test_a12b_gegenprobe_ohne_tagesreset_bleibt_kill_switch_aktiv():
+    """Dieselbe Situation, aber ohne den Tagesgrenzen-Reset aus replay.py nachgebaut
+    (wie im Live-Pfad, E-008): der Kill Switch bleibt auch an Tag 2 aktiv, 0 Fills."""
+    day_len = 96
+    n = 3 * day_len
+    prices = [Decimal("100") if i < 2 else Decimal("50") for i in range(n)]
+    candles = [
+        Candle(symbol="BTCUSDC", interval="15m", open_time=i * 900_000, close_time=i * 900_000 + 899_999,
+               open=prices[i], high=prices[i], low=prices[i], close=prices[i], volume=Decimal("1"), closed=True)
+        for i in range(n)
+    ]
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    db.migrate(conn)
+    store.create_run(conn, "live-sim", "live", db.now(), "0.3.0")
+    ledger = Ledger(starting_cash=Decimal("10000"), specs=SPECS, fee_bps=10.0, slippage_bps=5.0)
+    cfg = Config(Decimal("10000"), 100, 2, 100, Path("/tmp"), "x" * 32)
+    ctx = ExecutionContext(conn=conn, run_id="live-sim", ledger=ledger, engine=RiskEngine(cfg),
+                            specs=SPECS, fee_bps=10.0, slippage_bps=5.0, clock=SimClock(0))
+    sod_equity = Decimal("10000")
+    fills_nach_ausloesung = 0
+    ausgeloest = False
+    for t in range(1, n):
+        current = candles[t - 1]
+        ctx.clock.set(current.close_time)
+        # KEIN Tagesreset hier -- das ist der Unterschied zu run_replay()
+        proposal = Proposal("BTCUSDC", "BUY", position_pct=100) if t == 1 else Proposal("BTCUSDC", "SELL", position_pct=1)
+        result = execute_proposal(proposal, ctx, marks={"BTCUSDC": current.close}, ts_ms=current.close_time,
+                                   ref_price=current.close, start_of_day_equity=sod_equity, next_candle=candles[t])
+        if result.code == "DAILY_LOSS" and not ausgeloest:
+            ausgeloest = True
+            ctx.kill_switch = True
+        if ausgeloest and result.fill is not None:
+            fills_nach_ausloesung += 1
+    assert ausgeloest is True
+    assert fills_nach_ausloesung == 0
+
+
+def test_cli_lauft_end_to_end(tmp_path):
+    candles = _candles(20)
+    conn = db.connect(tmp_path / "cli.db")
+    db.migrate(conn)
+    store.upsert_candles(conn, [
+        store.CandleRow(symbol=c.symbol, interval=c.interval, open_time=c.open_time,
+                         close_time=c.close_time, open=c.open, high=c.high, low=c.low,
+                         close=c.close, volume=c.volume, source="fixture",
+                         fetched_at="2026-01-01T00:00:00Z")
+        for c in candles
+    ])
+    conn.close()
+    out = subprocess.run(
+        [sys.executable, "-m", "aitra.replay", "--symbol", "BTCUSDC", "--interval", "15m",
+         "--from", "1970-01-01T00:00:00+00:00", "--to", "1970-01-01T06:00:00+00:00",
+         "--db", str(tmp_path / "cli.db")],
+        cwd=str(Path(__file__).resolve().parent.parent), capture_output=True, text=True,
+        env={**os.environ, "DATA_DIR": str(tmp_path), "ADMIN_TOKEN": "x" * 32},
+    )
+    assert out.returncode == 0, out.stderr
+    assert re.search(r"[0-9a-f]{64}", out.stdout)  # der Hash, den auch A-8c vergleicht
