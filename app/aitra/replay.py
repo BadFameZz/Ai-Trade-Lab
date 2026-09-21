@@ -197,12 +197,29 @@ def _hash_fills(fills: list[Fill]) -> str:
     return hashlib.sha256(payload.encode()).hexdigest()
 
 
+def _iso_ms(wert: str) -> int:
+    """ISO-8601 nach Millisekunden seit der Epoche; ohne Zeitzone gilt UTC.
+
+    datetime.fromisoformat() liefert bei einer nackten Datumsangabe ein naives
+    datetime, und .timestamp() rechnet ein solches in der LOKALZEIT des
+    Rechners um. Gemessen unter Europe/Berlin ergibt '1970-01-01' dann
+    -3.600.000 ms statt 0, im Sommer sind es zwei Stunden. Derselbe Befehl
+    liefert damit auf zwei Rechnern verschiedene Kerzenmengen und verschiedene
+    Hashes -- direkt gegen A-8c. Fehlt tzinfo, wird deshalb UTC angenommen.
+    """
+    dt = datetime.fromisoformat(wert)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return int(dt.timestamp() * 1000)
+
+
 def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Aitra Replay (Zeitraffer/DB-Backtest, E-001)")
     p.add_argument("--symbol", required=True)
     p.add_argument("--interval", default="15m")
-    p.add_argument("--from", dest="from_", required=True, help="ISO-8601, z. B. 2025-01-01T00:00:00+00:00")
-    p.add_argument("--to", required=True, help="ISO-8601")
+    p.add_argument("--from", dest="from_", required=True,
+                   help="ISO-8601, z. B. 2025-01-01T00:00:00+00:00; ohne Zeitzone gilt UTC")
+    p.add_argument("--to", required=True, help="ISO-8601; ohne Zeitzone gilt UTC")
     p.add_argument("--db", default=None, help="Pfad zur aitra.db; ohne Angabe :memory:")
     p.add_argument("--strategie", choices=sorted(STRATEGIEN), default="wait",
                    help="eingebaute Strategie: 'wait' (nie handeln) oder 'takt' "
@@ -213,8 +230,8 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
 def main(argv: list[str] | None = None) -> int:
     """CLI-Einstiegspunkt: einziger Weg, einen Replay-Lauf zu starten (kein HTTP-Endpunkt)."""
     args = _parse_args(argv)
-    from_ms = int(datetime.fromisoformat(args.from_).timestamp() * 1000)
-    to_ms = int(datetime.fromisoformat(args.to).timestamp() * 1000)
+    from_ms = _iso_ms(args.from_)
+    to_ms = _iso_ms(args.to)
 
     conn = db.connect(Path(args.db)) if args.db else sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row

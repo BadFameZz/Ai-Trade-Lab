@@ -19,7 +19,7 @@ from aitra.config import Config
 from aitra.execute import ExecutionContext, execute_proposal
 from aitra.ledger import Ledger
 from aitra.marketdata import Candle, ListSource, SimClock, SqliteSource
-from aitra.replay import ReplayResult, run_replay
+from aitra.replay import ReplayResult, _iso_ms, run_replay
 from aitra.risk import Proposal, RiskEngine
 
 from test_execute import _install_apply_guard
@@ -621,3 +621,54 @@ def test_cli_bericht_nennt_benchmark_gekauft(tmp_path):
     )
     assert out.returncode == 0, out.stderr
     assert "Benchmark-gekauft=ja" in out.stderr, out.stderr
+
+
+def test_iso_ms_nimmt_ohne_zeitzone_utc_an():
+    """Fix-Welle, Review-Befund 10: nackte Datumsangaben wurden als Lokalzeit
+    gelesen. Diese Pruefung ist von der Zeitzone des Rechners unabhaengig --
+    sie vergleicht die nackte Form direkt mit der ausdruecklichen UTC-Form."""
+    assert _iso_ms("1970-01-01") == 0
+    assert _iso_ms("1970-01-01") == _iso_ms("1970-01-01T00:00:00+00:00")
+    assert _iso_ms("2025-01-01") == _iso_ms("2025-01-01T00:00:00+00:00")
+    assert _iso_ms("2025-07-01") == _iso_ms("2025-07-01T00:00:00+00:00")  # Sommerzeit
+    # Eine ausdrueckliche Zeitzone wird weiterhin respektiert.
+    assert _iso_ms("2025-01-01T00:00:00+01:00") == _iso_ms("2025-01-01") - 3_600_000
+
+
+def test_cli_nackte_datumsangaben_sind_utc_unabhaengig_von_der_rechnerzeitzone(tmp_path):
+    """Derselbe Befehl muss auf zwei Rechnern dieselbe Kerzenmenge und
+    denselben Hash liefern (A-8c). Gemessen unter Europe/Berlin ergibt
+    '1970-01-01' als Lokalzeit -3.600.000 ms statt 0 -- vier Kerzen Unterschied
+    im hier gewaehlten Fenster."""
+    candles = _candles(300)
+    conn = db.connect(tmp_path / "tz.db")
+    db.migrate(conn)
+    store.upsert_candles(conn, [
+        store.CandleRow(symbol=c.symbol, interval=c.interval, open_time=c.open_time,
+                         close_time=c.close_time, open=c.open, high=c.high, low=c.low,
+                         close=c.close, volume=c.volume, source="fixture",
+                         fetched_at="2026-01-01T00:00:00Z")
+        for c in candles
+    ])
+    conn.close()
+
+    def lauf(tz: str, von: str, bis: str):
+        out = subprocess.run(
+            [sys.executable, "-m", "aitra.replay", "--symbol", "BTCUSDC", "--interval", "15m",
+             "--from", von, "--to", bis, "--db", str(tmp_path / "tz.db"), "--strategie", "takt"],
+            cwd=str(Path(__file__).resolve().parent.parent), capture_output=True, text=True,
+            env={**os.environ, "TZ": tz, "DATA_DIR": str(tmp_path), "ADMIN_TOKEN": "x" * 32},
+        )
+        assert out.returncode == 0, out.stderr
+        kerzen = re.search(r"Kerzen=(\d+)", out.stderr)
+        assert kerzen is not None, out.stderr
+        return out.stdout.strip(), int(kerzen.group(1))
+
+    utc = lauf("UTC", "1970-01-01", "1970-01-02")
+    berlin = lauf("Europe/Berlin", "1970-01-01", "1970-01-02")
+    ausdruecklich = lauf("UTC", "1970-01-01T00:00:00+00:00", "1970-01-02T00:00:00+00:00")
+
+    assert utc == berlin, f"Zeitzone des Rechners aendert das Ergebnis: UTC={utc}, Berlin={berlin}"
+    assert utc == ausdruecklich  # nackt und ausdruecklich UTC sind dasselbe
+    assert utc[1] == 97  # hergeleitet: open_time 0 .. 86_400_000 bei 900_000 ms Schritt
+    assert utc[0] != _hash_fills([])  # Mindestsicherung: der Lauf war nicht leer
