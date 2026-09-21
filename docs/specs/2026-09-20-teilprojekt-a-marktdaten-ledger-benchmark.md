@@ -848,9 +848,22 @@ Die Begründung jeder `MIN_NOTIONAL`-Ablehnung enthält den effektiven Wert:
 **A-5 · Der Losgrößenverlust ist beziffert, nicht behauptet.**
 Bei `step = 0.00001` und 1.000 Preisstufen um 81.287 USDC liegt der Rundungsrest einer
 1.000-USDC-Order zwischen 0 und `step·preis = 0,8129 USDC`. Der Test prüft
-`max(rest) < 0.8129` **und** `max(rest) > 0.70` — die Grenze wird also ausgereizt —
+`max(rest) < 0.8129` **und** `max(rest) > ~~0.70~~` — die Grenze wird also ausgereizt —
 sowie `max(rest)/1000 < 0.001` (= 0,1 %, der Wert aus K-2).
 *Rot:* Den Rest der Kasse gutschreiben *und* die Menge aufrunden → `rest < 0` tritt auf.
+
+> **Korrektur Fix-Welle A1 — die Untergrenze war gegriffen, nicht hergeleitet.** Die 0,70
+> oben stand nie fest, sie war eine plausibel wirkende Zahl ohne Herleitung. Tatsächlich prüft
+> `app/tests/test_sizing.py:286` die hergeleitete Schranke `step_size · 80787 / 2 = 0,403935`
+> USDC — der Kommentar über der Zusicherung leitet sie aus dem kleinstmöglichen `step · price`
+> im Feld her (Preis 80.787, der niedrigste der 1.000 Stichproben), davon die Hälfte, weil das
+> Rundungsverhalten über den Preisbereich nicht garantiert monoton auf das Maximum läuft. Das
+> ist **43 % schwächer** als die hier genannten 0,70. Gemessen im Container liegt `max(rest)`
+> bei **0,81324** USDC — innerhalb beider Schranken (`0,403935 < 0,81324 < 0,8129`), die
+> Obergrenze `0,8129` bleibt unverändert und gilt weiterhin für jede Stichprobe einzeln
+> (`max_allowed = step_size * fill.price`), nicht nur am Maximum.
+>
+> Abnahmebefehl: `python -m pytest -q tests/test_sizing.py::test_a5_losgroessenverlust_ist_beziffert`
 
 ### Das Nadelöhr
 
