@@ -192,7 +192,7 @@ bei jeder Kleinigkeit):
 | `store_run.py` | **224** | 181 | 14 flache CRUD-Funktionen über 5 lauf-/ledgerbezogene Tabellen (`runs`, `fills`, `positions`, `equity_curve`, die Lauf-Spalten von `decisions`), genau eine Verantwortung — die Naht zu `store.py` (Marktdaten) darunter. *A2, Aufgabe 5:* `ensure_run()` ergänzt (idempotentes `create_run` für den dauerhaften Lauf `"live"`, der jeden Prozess-Neustart überlebt, A-14). |
 | `replay.py` | **298** | 247 | Engine *und* CLI in einem Modul — so von Abschnitt 3.1 vorgegeben („`__main__` als CLI"). Gewachsen um `--strategie` (A-8c), Equity-Kurve, `finish_run`, `_iso_ms` (UTC). In A2 bewusst **nicht** angefasst (zwei Zeilen unter der harten Marke) — jede weitere Zeile hier braucht vorherige Rücksprache, nicht stillschweigendes Teilen. |
 | `ledger.py` | **236** | 200 | Gewachsen um die strenge `mark()` (wirft bei Position ohne Marktpreis) und `last_marks`, in A2/Aufgabe 5 um `restore(positions, cash)` (A-14: Kasse/Positionen aus dem Journal setzen statt über `apply()` zu erarbeiten, für den Start eines neuen Prozesses). Fast nur Docstring, der das *Warum* trägt. |
-| `web.py` | **218** | 188 | Bestand, von A2 bisher nicht berührt (Aufgabe 6 verdrahtet `poller.start()`). |
+| `web.py` | **226** | 191 *(A2, Aufgabe 6)* | HTTP-Huelle: App-Aufbau, Sicherheitskopfzeilen, Anmeldung, Kill Switch, `decisions`/`events`/`version`, sowie `POST /api/risk/check` (bucht ueber `execute_proposal()` - bleibt hier, A-6b praeft die aufrufende Datei). `status()`/`health()` sind seit der Teilung mit `dashboard.py` (Ruling des Koordinators zur 300-Zeilen-Rueckfrage) nur noch duenne Huellen, die `jsonify()`en, was dort berechnet wird. |
 | `execute.py` | **237** | 206 | Gewachsen um `reject_decision()` an sieben Stellen, `pending_ref_price` und `resolve_pending()`/`expire_stale_pending()` (E-010, Weg A: schwebende Vorschläge ohne Neubemessung aus dem Live-Poller auflösen, A2/Aufgabe 5). |
 | `db.py` | **228** | 201 | Gewachsen um Migration 3 samt Begründung im SQL-Kommentar. *A2, Aufgabe 5 (Fixrunde 1, kritischer Fund):* `connect()` öffnet jetzt mit `check_same_thread=False` samt Docstring-Begründung — ohne das schlägt jeder Datenbankzugriff aus dem Poller-Thread mit `sqlite3.ProgrammingError` fehl, von `run_forever()`s bewusst weitem `except Exception` unbemerkt in Backoff verwandelt (stiller Totalausfall der Kernfunktion von Aufgabe 5). |
 | `binance.py` | **280** | 235 *(A2, Aufgabe 3 + Fixrunde 1)* | Der einzige Netzzugang des Pakets bündelt jede Härtung an einer Stelle, weil es keine zweite gibt: fünf Ausnahmeklassen, ein eigener Redirect-Handler (A-17b), ein Host-/Schema-Wächter, der im Konstruktor **und** vor jeder Einzelanfrage läuft (A-17), defensive `Decimal`-Wandlung mit float/bool-Ablehnung (E-002, mit eigenem Kommentar, warum beide Prüfungen bleiben), drei Endpunkte (`server_time`, `klines`, `exchange_info`) samt Gewichtszähler (A-17c), ein nach oben gedeckelter `Retry-After` und ein Fangzweig für Netzfehler jenseits von `URLError` (`OSError`, `http.client.HTTPException` — Fixrunde 1, Befund 1). Rund ein Drittel der Zeilen sind Docstrings, die das Warum jeder Prüfung tragen. |
@@ -212,6 +212,18 @@ verlangt aber eine Begründung, keine Kürzung.
 > 200er-Richtwert, unter der 300er-Marke). Beide liegen damit unter der harten Marke;
 > `test_modulgroesse.py` sichert das für das gesamte Verzeichnis zu, nicht nur für diese zwei
 > Dateien.
+
+> **Zweite Teilung in A2, Aufgabe 6 (Ruling des Koordinators).** `web.py` erreichte beim
+> Verdrahten der geführten Kasse, echter Positionen und der neuen Endpunkte 318 Zeilen — über
+> der harten Marke. Anders als bei `store.py`/`store_run.py` liegt die Naht hier **nicht**
+> zwischen Datentabellen, sondern zwischen **Verantwortung**: `web.py` beantwortet HTTP, das
+> neue `dashboard.py` (**148 Zeilen**, unter dem 200er-Richtwert, keine eigene Zeile hier nötig)
+> rechnet als freie Funktionen — ohne Flask, ohne `g`, ohne Anfragekontext — aus, was
+> `GET /api/status` und `GET /api/health` aussagen (`build_live_ledger()`, `last_prices()`,
+> `build_status()`, `build_health()`). `risk_check()` bleibt in `web.py`: es bucht über
+> `execute_proposal()`, und A-6b prüft die aufrufende *Datei* — eine buchende Funktion in ein
+> neues Modul zu ziehen wäre eine Änderung am Nadelöhr, die dieser Umzug nicht vornimmt.
+> `web.py` liegt danach bei **226 Zeilen**, `test_modulgroesse.py` deckt auch diese Trennung ab.
 
 ### 3.2 Geändert
 

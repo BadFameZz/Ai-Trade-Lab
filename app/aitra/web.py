@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import hmac
 import logging
-import shutil
 import threading
 import time
 from decimal import Decimal
@@ -11,10 +10,9 @@ from pathlib import Path
 
 from flask import Flask, g, jsonify, request
 
-from . import VERSION, db, money, poller, store, store_run
+from . import VERSION, dashboard, db, money, poller, store, store_run
 from .config import Config, load
 from .execute import ExecutionContext, execute_proposal
-from .ledger import Ledger, Position, realized_pnl_per_sell
 from .risk import Proposal, RiskEngine
 
 log = logging.getLogger("aitra.web")
@@ -61,31 +59,6 @@ def create_app(cfg: Config | None = None) -> Flask:
 
     def kill_switch() -> bool:
         return db.get_state(conn(), "kill_switch", "0") == "1"
-
-    def _live_ledger() -> Ledger:
-        """Rekonstruiert den Live-Ledger aus dem Journal (A-14) - bei jedem
-        Request neu, absichtlich: es gibt keinen mit dem Poller-Thread
-        geteilten Ledger-Zustand, um Threading-Kollisionen zwischen dem
-        Poller (poller.py) und gunicorn-Request-Threads zu vermeiden."""
-        ledger = Ledger(starting_cash=cfg.starting_balance, specs=app.config["AITRA_SPECS"],
-                         fee_bps=cfg.fee_bps, slippage_bps=cfg.slippage_bps)
-        positions = {s: Position(s, p["qty"], p["avg_price"], p["realized_pnl"])
-                     for s, p in store_run.get_positions(conn(), "live").items()}
-        fills = store_run.get_fills(conn(), "live")
-        cash = fills[-1]["cash_after"] if fills else cfg.starting_balance
-        ledger.restore(positions, cash)
-        return ledger
-
-    def _last_prices() -> dict:
-        """Letzter bekannter Schlusskurs je konfiguriertem Symbol - deckt jede
-        gehaltene Position ab, weil Positionen nur in konfigurierten Symbolen
-        entstehen koennen (execute_proposal lehnt alles andere mit NO_SPEC ab)."""
-        preise = {}
-        for sym in app.config["AITRA_SPECS"]:
-            rows = store.get_candles(conn(), sym, cfg.market_interval, limit=1)
-            if rows:
-                preise[sym] = rows[-1].close
-        return preise
 
     def authorized() -> bool:
         token = request.headers.get("X-Admin-Token", "")
@@ -138,48 +111,9 @@ def create_app(cfg: Config | None = None) -> Flask:
 
     @app.get("/api/status")
     def status():
-        ledger = _live_ledger()
-        marks = _last_prices()
-        v = ledger.mark(marks, ts_ms=int(time.time() * 1000))
-        pf = ledger.to_portfolio_state(v, Decimal(db.get_state(conn(), "sod_equity", str(cfg.starting_balance))))
-        ks = kill_switch()
-        fills = store_run.get_fills(conn(), "live")
-        positions = [
-            {"symbol": s, "qty": money.to_text(p["qty"]), "avg_price": money.to_text(p["avg_price"]),
-             "realized_pnl": money.to_text(p["realized_pnl"])}
-            for s, p in store_run.get_positions(conn(), "live").items() if p["qty"] != 0
-        ]
-        curve = store_run.get_equity_curve(conn(), "live", limit=100_000)
-        bench_equity = curve[-1]["benchmark_equity"] if curve else None
-        max_dd = Decimal(0)
-        peak = curve[0]["equity"] if curve else None
-        for pt in curve:
-            peak = max(peak, pt["equity"])
-            if peak > 0:
-                max_dd = max(max_dd, (peak - pt["equity"]) / peak * 100)
-        sells = [f for f in fills if f["side"] == "SELL"]
-        pnls = realized_pnl_per_sell(fills)
-        hit_rate = round(100 * sum(1 for p in pnls if p > 0) / len(pnls), 2) if pnls else None
-        return jsonify(
-            version=VERSION, mode=cfg.trading_mode, live_locked=cfg.live_locked,
-            # E-007/Randbedingung dieser Aufgabe: Geld geht als Zeichenkette raus, nie als
-            # JSON-Zahl. Abweichung vom Brief (gemeldet): equity/pnl/daily_pnl standen dort
-            # als rohes Decimal, das Flasks JSON-Provider zwar ebenfalls in einen String
-            # verwandelt (str(Decimal(...))), aber ohne die kanonischen 8 Nachkommastellen -
-            # inkonsistent zu cash/positions/benchmark, die bereits money.to_text() nutzen.
-            equity=money.to_text(v.equity), cash=money.to_text(ledger.cash),
-            starting_balance=cfg.starting_balance,
-            pnl=money.to_text(round(v.equity - cfg.starting_balance, 8)),
-            daily_pnl=money.to_text(round(v.equity - pf.start_of_day_equity, 8)),
-            daily_loss_pct=round(engine.daily_loss_pct(pf), 4),
-            exposure_pct=v.exposure_pct, risk="BLOCKED" if ks else "NORMAL", kill_switch=ks,
-            positions=positions, trades_total=len(fills),
-            benchmark=dict(symbol=cfg.benchmark_symbol,
-                            equity=(money.to_text(bench_equity) if bench_equity is not None else None)),
-            alpha_pct=None, hit_rate_pct=hit_rate, max_drawdown_pct=float(max_dd),
-            limits=dict(max_position_pct=cfg.max_position_pct, max_daily_loss_pct=cfg.max_daily_loss_pct,
-                        max_total_exposure_pct=cfg.max_total_exposure_pct),
-        )
+        # Rechnung in dashboard.py (Ruling des Koordinators): web.py sammelt nur
+        # noch Anfragekontext ein und liefert aus, was dort berechnet wird.
+        return jsonify(**dashboard.build_status(conn(), cfg))
 
     @app.get("/api/decisions")
     def decisions():
@@ -193,34 +127,8 @@ def create_app(cfg: Config | None = None) -> Flask:
 
     @app.get("/api/health")
     def health():
-        checks: dict[str, str] = {}
-        try:
-            conn().execute("SELECT 1").fetchone()
-            checks["database"] = "ok"
-        except Exception:
-            checks["database"] = "error"
-        free_gb = shutil.disk_usage(cfg.data_dir).free / 1e9
-        checks["disk"] = "ok" if free_gb > 1 else "low"
-        checks["risk_engine"] = "ok"
-        thread = app.config.get("AITRA_POLLER_THREAD")
-        if not cfg.market_data_enabled:
-            checks["paper_engine"] = "idle"
-        else:
-            checks["paper_engine"] = "ok" if thread is not None and thread.is_alive() else "error"
-        checks["market_data"] = db.get_state(conn(), "market_data_status", "not_configured")
-        healthy = (checks["database"] == "ok" and checks["disk"] == "ok"
-                   and checks["market_data"] != "stale" and checks["paper_engine"] != "error")
-        body = dict(
-            status="healthy" if healthy else "degraded",
-            version=VERSION,
-            trading_mode=cfg.trading_mode,
-            kill_switch=kill_switch() if checks["database"] == "ok" else None,
-            uptime_s=int(time.time() - STARTED),
-            disk_free_gb=round(free_gb, 1),
-            server_time=db.now(),
-            **checks,
-        )
-        return jsonify(body), 200 if healthy else 503
+        body, code = dashboard.build_health(conn(), cfg, app.config.get("AITRA_POLLER_THREAD"), STARTED)
+        return jsonify(body), code
 
     # ---------- Kill Switch ----------
 
@@ -266,12 +174,12 @@ def create_app(cfg: Config | None = None) -> Flask:
         ts_ms = rows[-1].close_time if rows else int(time.time() * 1000)
 
         specs = app.config["AITRA_SPECS"]
-        ledger = _live_ledger()
+        ledger = dashboard.build_live_ledger(conn(), cfg)
         ex_ctx = ExecutionContext(conn=conn(), run_id="live", ledger=ledger, engine=engine,
                                    specs=specs, fee_bps=cfg.fee_bps, slippage_bps=cfg.slippage_bps,
                                    clock=poller.WallClock(), kill_switch=kill_switch())
         sod = Decimal(db.get_state(conn(), "sod_equity", str(cfg.starting_balance)))
-        marks = _last_prices()
+        marks = dashboard.last_prices(conn(), cfg)
         result = execute_proposal(
             p, ex_ctx, marks=marks, ts_ms=ts_ms, ref_price=ref_price, start_of_day_equity=sod,
             strategy_version=str(data.get("strategy_version", "manual"))[:40],
