@@ -369,3 +369,53 @@ def test_resolve_pending_verwirft_zeilen_ohne_gespeicherten_ref_price(tmp_path):
                             (pending.decision_id,)).fetchone()
     assert row["risk_code"] == "PENDING_EXPIRED"
     assert row["pending_since_ms"] is None
+
+
+def test_a2_kasse_und_mengen_nichtnegativ_ueber_execute_proposal(tmp_path):
+    """A-2 ein zweites Mal, diesmal durch das Nadeloehr (Fix-Welle, Review-Befund 4).
+
+    Der bestehende A-2-Treiber in test_ledger.py rechnet die Menge selbst aus und
+    ruft Ledger.apply() direkt -- sizing.py liegt dabei gar nicht im Pfad, obwohl
+    genau dort die INSUFFICIENT_CASH-Pruefung steht, deren Entfernen der von der
+    Spec zu A-2 vorgesehene Rot-Nachweis ist. Dieser Lauf geht ueber
+    execute_proposal() und damit durch RiskEngine.check() -> size_order() ->
+    Ledger.apply(). Zwei Symbole, abwechselnd BUY und SELL, geprueft nach JEDEM
+    Aufruf -- auch nach den abgelehnten, denn eine Ablehnung darf die Buecher
+    ebenso wenig verschieben wie ein Fill.
+    """
+    ctx = _ctx(tmp_path)
+    # Gemessen werden soll hier der KASSENWAECHTER, nicht die Risikoschranken.
+    # Mit max_total_exposure_pct=100 haelt schon MAX_EXPOSURE die Kasse ueber
+    # Null, und der Test bliebe auch ohne jeden INSUFFICIENT_CASH-Waechter gruen
+    # (nachgemessen: beide Waechter entfernt -> weiterhin gruen). Deshalb sind
+    # die uebrigen Schranken hier bewusst aufgezogen, damit die Kasse die
+    # einzige verbliebene Grenze ist.
+    ctx.engine = RiskEngine(Config(Decimal("10000"), 100, 100, 10_000, tmp_path, "x" * 32))
+    basispreise = {"BTCUSDC": Decimal("81287.03"), "ETHUSDC": Decimal("2631.77")}
+    fills = 0
+    for i in range(400):
+        marks = {s: basispreise[s] + Decimal(i % 50) * SPECS[s].tick_size for s in basispreise}
+        symbol = "BTCUSDC" if i % 2 == 0 else "ETHUSDC"
+        preis = marks[symbol]
+        seite = "BUY" if i % 3 != 2 else "SELL"
+        ts = (i + 1) * 900_000
+        kerze = Candle(symbol=symbol, interval="15m", open_time=ts, close_time=ts + 899_999,
+                        open=preis, high=preis, low=preis, close=preis,
+                        volume=Decimal("1"), closed=True)
+        r = execute_proposal(
+            Proposal(symbol, seite, position_pct=5), ctx, marks=marks, ts_ms=ts,
+            ref_price=preis, start_of_day_equity=Decimal("10000"), next_candle=kerze,
+        )
+        if r.status == "filled":
+            fills += 1
+        assert ctx.ledger.cash >= Decimal("0"), (
+            f"A-2 verletzt: Kasse {ctx.ledger.cash} < 0 bei Schritt {i} ({seite} {symbol}, {r.code})"
+        )
+        for s in basispreise:
+            assert ctx.ledger.position(s).qty >= Decimal("0"), (
+                f"A-2 verletzt: Menge {s} = {ctx.ledger.position(s).qty} < 0 bei Schritt {i}"
+            )
+    # Pruefflaeche: ohne echte Fills misst der Lauf nichts. Die Untergrenze ist
+    # bewusst grob (halb so gross wie die Zahl der BUY-Versuche, 400 * 2/3 / 2),
+    # damit sie eine leerlaufende Kette meldet, ohne an einer Messzahl zu kleben.
+    assert fills >= 133, f"Pruefflaeche zu klein: nur {fills} von 400 Versuchen gefuellt"

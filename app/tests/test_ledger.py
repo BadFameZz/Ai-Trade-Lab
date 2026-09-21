@@ -204,6 +204,29 @@ def test_buchhaltung_identitaet_a1():
         # Pruefung 1: tautologisch (beide Seiten aus mark()/self._cash), zeigt
         # nur, dass mark() sich selbst nicht widerspricht.
         assert v.equity - (v.cash + held_value) == Decimal("0")
+        # A-2 (Fix-Welle, Review-Befund 4): gefordert ist min(cash) >= 0 und
+        # min(qty) >= 0 IN DENSELBEN 10.000 Fills, nicht nur am Ende. Eine
+        # zwischenzeitlich negative Kasse, die sich bis zum letzten Fill wieder
+        # erholt, war vorher unsichtbar.
+        #
+        # EHRLICHE EINORDNUNG (gemessen, nicht vermutet): Diese beiden Zeilen
+        # sind hier nicht rot zu bekommen. Der Treiber oben deckelt den Kauf
+        # selbst auf 95 % der Kasse und den Verkauf selbst auf pos.qty; eine
+        # negative Kasse bzw. Menge ist damit strukturell ausgeschlossen,
+        # unabhaengig vom Produktivcode. Nachgemessen im Container:
+        #   - beide INSUFFICIENT_CASH-Waechter (sizing.py + ledger.py) entfernt
+        #     -> dieser Test bleibt gruen (1 passed)
+        #   - der Bestandswaechter (qty > pos.qty) in ledger.py entfernt
+        #     -> dieser Test bleibt gruen (1 passed)
+        # Die belastbare A-2-Messung ist deshalb
+        # test_execute.py::test_a2_kasse_und_mengen_nichtnegativ_ueber_execute_proposal,
+        # wo sizing.py die Menge bestimmt: dort schlaegt dieselbe Entfernung mit
+        # "Kasse -482.74576514 < 0 bei Schritt 55" fehl.
+        assert ledger.cash >= Decimal("0"), f"Kasse negativ nach Fill {treffer}: {ledger.cash}"
+        assert min(ledger.position(s).qty for s in ("BTCUSDC", "ETHUSDC")) >= Decimal("0"), (
+            f"Menge negativ nach Fill {treffer}: "
+            f"{[(s, ledger.position(s).qty) for s in ('BTCUSDC', 'ETHUSDC')]}"
+        )
     assert treffer >= 9000  # die Pruefflaeche darf nicht leer sein (gemessen: 9989/10000)
     assert ledger.cash >= Decimal("0")
     assert ledger.position("BTCUSDC").qty >= Decimal("0")
