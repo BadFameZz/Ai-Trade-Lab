@@ -80,10 +80,10 @@ def test_positions_und_equity_curve_runtrip(tmp_path):
     )
     positions = store.get_positions(conn, "run-1")
     assert positions["BTCUSDC"]["qty"] == Decimal("0.01")
-    store.append_equity_point(
-        conn, run_id="run-1", ts_ms=900_000, equity=Decimal("10000"), cash=Decimal("9186.32"),
+    store.append_equity_points(conn, [store.EquityPoint(
+        run_id="run-1", ts_ms=900_000, equity=Decimal("10000"), cash=Decimal("9186.32"),
         benchmark_equity=Decimal("10000"), exposure_pct=8.13,
-    )
+    )])
     curve = store.get_equity_curve(conn, "run-1")
     assert len(curve) == 1
     assert curve[0]["equity"] == Decimal("10000")

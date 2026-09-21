@@ -239,12 +239,6 @@ def append_equity_points(conn: sqlite3.Connection, punkte: Sequence[EquityPoint]
     conn.commit()
 
 
-def append_equity_point(conn: sqlite3.Connection, *, run_id: str, ts_ms: int, equity: Decimal,
-                         cash: Decimal, benchmark_equity: Decimal | None, exposure_pct: float) -> None:
-    """Einzelner Punkt — Bequemlichkeitshuelle um append_equity_points()."""
-    append_equity_points(conn, [EquityPoint(run_id, ts_ms, equity, cash, benchmark_equity, exposure_pct)])
-
-
 def get_equity_curve(conn: sqlite3.Connection, run_id: str, limit: int = 500) -> list[dict]:
     rows = conn.execute(
         "SELECT * FROM equity_curve WHERE run_id = ? ORDER BY ts_ms ASC LIMIT ?", (run_id, limit),
