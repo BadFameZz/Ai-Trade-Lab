@@ -44,12 +44,20 @@ def test_buy_fill_rechnet_slippage_und_gebuehr_wie_in_spec_6_1():
 
 def test_sell_fill_rundet_gegen_den_haendler():
     ledger = _ledger()
-    ledger.apply(Order("BTCUSDC", "BUY", Decimal("0.02")), _candle("81287.03"))
+    buy = ledger.apply(Order("BTCUSDC", "BUY", Decimal("0.02")), _candle("81287.03"))
+    assert isinstance(buy, Fill)
     f = ledger.apply(Order("BTCUSDC", "SELL", Decimal("0.01")), _candle("81400.00", open_time=1_800_000))
     assert isinstance(f, Fill)
     # s=0.0005: exec = tick_down(81400*0.9995) = tick_down(81359.30) = 81359.30
     assert f.price == Decimal("81359.30")
     assert f.side == "SELL"
+    # gross = 81359.30*0.01 = 813.5930, fee = round_up(813.5930*0.0010, 8dp) = 0.81359300
+    # net_quote = gross - fee (SELL: Gebuehr wird abgezogen, nicht addiert)
+    assert f.gross_quote == Decimal("813.5930")
+    assert f.fee == Decimal("0.81359300")
+    assert f.net_quote == Decimal("812.77940700")
+    assert f.cash_after == buy.cash_after + f.net_quote
+    assert f.cash_after == Decimal("9184.59925340")
 
 
 def test_ledger_nutzt_nur_open_und_open_time_der_folgekerze():
@@ -144,8 +152,21 @@ def test_buchhaltung_identitaet_a1():
     95 % der aktuellen Kasse gedeckelt, damit der Kreislauf traegt. Die
     Identitaetspruefung selbst (exakte Gleichheit, keine Toleranz) bleibt
     unveraendert.
+
+    Fix-Runde 1 (Spec Abschnitt 12, A-1): Pruefung 1 (v.equity == v.cash +
+    Positionswert) liest beide Seiten aus denselben Objekten und ist damit
+    tautologisch gegenueber Buchungsfehlern in apply() - ein solcher Fehler
+    verschiebt cash und equity gleichermassen, die Gleichung haelt trotzdem.
+    Pruefung 2 rekonstruiert die Endkasse unabhaengig aus den net_quote-Werten
+    der von apply() zurueckgegebenen Fill-Objekte (nicht aus self._cash) und
+    faengt damit auch Buchungsfehler und schleichende Rundungsabweichungen,
+    die sich erst ueber tausende Fills aufsummieren. Pruefung 1 bleibt
+    daneben stehen, sie wird nicht ersetzt.
     """
     ledger = _ledger()
+    cash_start = ledger.cash
+    summe_net_buy = Decimal("0")
+    summe_net_sell = Decimal("0")
     ts = 900_000
     treffer = 0
     for i in range(10_000):
@@ -174,13 +195,23 @@ def test_buchhaltung_identitaet_a1():
         if isinstance(result, Rejection):
             continue
         treffer += 1
+        if result.side == "BUY":
+            summe_net_buy += result.net_quote
+        else:
+            summe_net_sell += result.net_quote
         v = ledger.mark({"BTCUSDC": price, "ETHUSDC": price}, ts_ms=ts)
         held_value = sum(ledger.position(s).qty * price for s in ("BTCUSDC", "ETHUSDC"))
+        # Pruefung 1: tautologisch (beide Seiten aus mark()/self._cash), zeigt
+        # nur, dass mark() sich selbst nicht widerspricht.
         assert v.equity - (v.cash + held_value) == Decimal("0")
     assert treffer >= 9000  # die Pruefflaeche darf nicht leer sein (gemessen: 9989/10000)
     assert ledger.cash >= Decimal("0")
     assert ledger.position("BTCUSDC").qty >= Decimal("0")
     assert ledger.position("ETHUSDC").qty >= Decimal("0")
+    # Pruefung 2 (Spec 12, A-1): Endkasse unabhaengig aus den Fill-net_quote-
+    # Werten rekonstruiert, nicht aus self._cash - nicht tautologisch.
+    rekonstruiert = cash_start - summe_net_buy + summe_net_sell
+    assert ledger.cash - rekonstruiert == Decimal("0")
 
 
 def test_a8b_keine_versteckte_uhr_kein_versteckter_zufall():
