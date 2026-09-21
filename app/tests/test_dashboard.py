@@ -53,6 +53,18 @@ def _funktionskoerper(skript: str, name: str) -> str:
         i += 1
 
 
+def _alle_ladefunktionen(skript: str) -> dict[str, str]:
+    """Jeder `function load...`-Koerper, dynamisch gefunden.
+
+    Zuvor standen hier fuenf Funktionsnamen fest im Test. Das war dieselbe
+    Momentaufnahme eine Ebene hoeher: eine neue Lesefunktion waere ungescannt
+    geblieben und haette ein erfundenes Feld unbemerkt lesen koennen
+    (im Nachreview der Fixrunde 1 nachgestellt und bestaetigt). Wer eine
+    Ladefunktion ergaenzt, muss hier nichts nachtragen."""
+    namen = re.findall(r"function\s+(load[A-Za-z0-9_]*)\s*\(", skript)
+    return {n: _funktionskoerper(skript, n) for n in namen}
+
+
 def _felder(praefix: str, quelltext: str) -> set[str]:
     """Alle `praefix.name`-Zugriffe im gegebenen Quelltextausschnitt."""
     return set(re.findall(rf"\b{praefix}\.([a-zA-Z_][a-zA-Z0-9_]*)\b", quelltext))
@@ -232,16 +244,18 @@ def test_html_felder_sind_teilmenge_der_echten_endpunkt_antworten(client, app):
     _gefuellte_db(app)
 
     skript = _skript(_text())
-    status_felder = (
-        _felder("s", _funktionskoerper(skript, "loadStatus"))
-        | _felder("s", _funktionskoerper(skript, "loadPositionsAndKpis"))
-        | _felder("p", _funktionskoerper(skript, "loadPositionsAndKpis"))
+    koerper = _alle_ladefunktionen(skript)
+    assert len(koerper) >= 7, (
+        f"Pruefflaeche: zu wenige Ladefunktionen gefunden, gemessen {len(koerper)}: "
+        f"{sorted(koerper)}"
     )
-    kurven_felder = _felder("p", _funktionskoerper(skript, "loadChart"))
-    entscheidungs_felder = (
-        _felder("r", _funktionskoerper(skript, "loadDecisions"))
-        | _felder("r", _funktionskoerper(skript, "loadPending"))
-    )
+    alle = "\n".join(koerper.values())
+    status_felder = _felder("s", alle)
+    # `p` bezeichnet je nach Funktion einen Kurvenpunkt oder eine Position -
+    # beide Schluesselmengen zusammen sind das Zulaessige. Cross-Object-
+    # Verwechslung faengt das nicht; das war auch vorher nicht der Zweck.
+    punkt_felder = _felder("p", alle)
+    entscheidungs_felder = _felder("r", alle)
 
     status = client.get("/api/status").get_json()
     kurve = client.get("/api/equity-curve?run_id=live&limit=500").get_json()
@@ -252,14 +266,15 @@ def test_html_felder_sind_teilmenge_der_echten_endpunkt_antworten(client, app):
     # zu bleiben - sonst meldet ein und derselbe Fehler zwei unterschiedliche,
     # verwirrende Ursachen je nachdem, welche Assertion zuerst greift.
     fehlend_status = status_felder - _alle_schluessel(status)
-    fehlend_kurve = kurven_felder - _alle_schluessel(kurve)
+    fehlend_kurve = punkt_felder - (_alle_schluessel(kurve) | _alle_schluessel(status))
     fehlend_entscheidung = entscheidungs_felder - _alle_schluessel(entscheidungen)
 
     assert fehlend_status == set(), (
         f"HTML erwartet Status-Felder, die /api/status nicht liefert: {sorted(fehlend_status)}"
     )
     assert fehlend_kurve == set(), (
-        f"HTML erwartet Kurvenpunkt-Felder, die /api/equity-curve nicht liefert: {sorted(fehlend_kurve)}"
+        "HTML erwartet Punkt-/Positionsfelder, die weder /api/equity-curve noch "
+        f"/api/status liefert: {sorted(fehlend_kurve)}"
     )
     assert fehlend_entscheidung == set(), (
         f"HTML erwartet Entscheidungs-Felder, die /api/decisions nicht liefert: {sorted(fehlend_entscheidung)}"
