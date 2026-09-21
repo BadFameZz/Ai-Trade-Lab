@@ -72,9 +72,22 @@ def test_list_und_sqlite_source_liefern_identische_kerzen(tmp_path: Path):
     assert [(c.open_time, c.open, c.close) for c in a] == [(c.open_time, c.open, c.close) for c in b]
 
 
+def test_list_source_filtert_offene_kerzen():
+    """ListSource darf offene Kerzen nie weitergeben (Critical)."""
+    closed_candles = [_candle(i * 900_000, closed=True) for i in range(3)]
+    open_candles = [_candle(i * 900_000 + 450_000, closed=False) for i in range(3)]
+    mixed = closed_candles + open_candles
+    src = ListSource(mixed)
+    out = src.candles("BTCUSDC", "15m")
+    # Prüfen: nur geschlossene, und die richtigen (nicht bloß Anzahl)
+    assert len(out) == 3
+    assert [c.open_time for c in out] == [0, 900_000, 1_800_000]
+    assert all(c.closed for c in out)
+
+
 @pytest.mark.parametrize("interval_s,age_s,expected", [
-    (60, 149, "ok"), (60, 299, "warn"), (60, 301, "stale"),
-    (900, 1349, "ok"), (900, 2699, "warn"), (900, 2701, "stale"),
+    (60, 149, "ok"), (60, 150, "ok"), (60, 151, "warn"), (60, 299, "warn"), (60, 301, "stale"),
+    (900, 1349, "ok"), (900, 1350, "ok"), (900, 1351, "warn"), (900, 2699, "warn"), (900, 2701, "stale"),
 ])
 def test_staleness_intervallrelative_schwellen_a11(interval_s, age_s, expected):
     clock = SimClock(age_s * 1000)
@@ -83,7 +96,7 @@ def test_staleness_intervallrelative_schwellen_a11(interval_s, age_s, expected):
     assert result.status == expected
 
 
-@pytest.mark.parametrize("skew_s,expected", [(31, "stale"), (29, "warn"), (4, "ok"), (-31, "stale")])
+@pytest.mark.parametrize("skew_s,expected", [(31, "stale"), (30, "warn"), (5, "ok"), (29, "warn"), (4, "ok"), (-31, "stale"), (-30, "warn"), (-5, "ok")])
 def test_staleness_uhrversatz_a11b(skew_s, expected):
     clock = SimClock(1_000_000)
     result = staleness(clock, latest_close_time_ms=clock.now_ms(), server_time_ms=clock.now_ms() - skew_s * 1000,
