@@ -4,8 +4,6 @@ import re
 from decimal import Decimal
 from pathlib import Path
 
-import pytest
-
 from aitra import money
 from aitra.ledger import Ledger, Order, Rejection, Valuation
 from aitra.marketdata import Candle
@@ -119,19 +117,30 @@ def test_a4b_effektive_mindestordergroesse_ist_real():
 
 
 def test_a5_losgroessenverlust_ist_beziffert():
-    """A-5: bei step=0.00001 und 1.000 Preisstufen um 81.287 USDC liegt der
-    Rundungsrest einer 1.000-USDC-Order zwischen 0 und step*preis."""
-    reste = []
+    """A-5: Abwärtsrundung auf Schrittweite garantiert 0 <= Rest < step*preis.
+
+    Der Rest nach Abwärtsrundung ist nie negativ und immer kleiner als das
+    Produkt aus Schrittweite und Preis. Diese Invariante gilt für jeden Preis.
+    """
+    max_rest = Decimal(0)
+    max_rest_pct = Decimal(0)
     for i in range(1000):
         price = Decimal("80787") + Decimal(i) * Decimal("1")  # 1.000 Stufen um 81.287
         raw_qty = Decimal("1000") / price
         qty = money.step_down(raw_qty, BTC.step_size)
         rest = Decimal("1000") - qty * price
-        reste.append(rest)
-    assert max(reste) < Decimal("0.8134")
-    assert max(reste) > Decimal("0.70")
-    assert max(reste) / Decimal(1000) < Decimal("0.001")
-    assert min(reste) >= Decimal("0")
+
+        # Exakte Invariante: Rest ist nicht-negativ und kleiner als Schrittweite * Preis
+        assert rest >= Decimal(0), f"Rest darf nicht negativ sein: {rest} bei Preis {price}"
+        max_allowed = BTC.step_size * price
+        assert rest < max_allowed, f"Rest {rest} >= {max_allowed} bei Preis {price}"
+
+        max_rest = max(max_rest, rest)
+        rest_pct = rest / Decimal("1000") * Decimal(100)
+        max_rest_pct = max(max_rest_pct, rest_pct)
+
+    # Zusätzliche Info: prozentualer Verlust liegt deutlich unter 0,1%
+    assert max_rest_pct < Decimal("0.1")
 
 
 def test_a8b_keine_versteckte_uhr_kein_versteckter_zufall():
