@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import ast
+import re
 from pathlib import Path
 
 AITRA = Path(__file__).resolve().parent.parent / "aitra"
@@ -58,7 +59,15 @@ def test_jedes_modul_ueber_200_zeilen_hat_eine_begruendungszeile_in_spec_3_1b():
     )
     assert len(ueber_200) >= 1, "Pruefflaeche zu klein: kein Modul ueber 200 Zeilen gefunden"
 
-    fehlend = [name for name in ueber_200 if f"`{name}`" not in abschnitt]
+    # Nicht irgendwo im Abschnitt, sondern als ERSTE Spalte einer Tabellenzeile.
+    # Vorher genuegte eine beilaeufige Erwaehnung in der Begruendung eines
+    # ANDEREN Moduls - so kam dashboard.py ohne eigene Zeile durch (Fixrunde
+    # Gesamtreview, gemeldet vom Bearbeiter). Ein Waechter, der eine Erwaehnung
+    # fuer eine Begruendung haelt, bewacht nichts.
+    zeilen_anfaenge = {
+        m.group(1) for m in re.finditer(r"^\|\s*`([^`]+)`\s*\|", abschnitt, re.M)
+    }
+    fehlend = [name for name in ueber_200 if name not in zeilen_anfaenge]
     assert fehlend == [], f"Module ueber 200 Zeilen ohne Begruendungszeile in Spec 3.1b: {fehlend}"
 
 
