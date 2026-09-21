@@ -171,13 +171,43 @@ def test_a5_losgroessenverlust_ist_beziffert():
     Prüft die Invariante an den **tatsächlichen Rückgaben** von size_order(),
     nicht an einer Parallelrechnung mit money.step_down(). Mit falscher Schrittweite
     wird die Invariante verletzt.
-    """
-    ledger = Ledger(starting_cash=Decimal("1000000"), specs={"BTCUSDC": BTC},
-                     fee_bps=0.0, slippage_bps=0.0)
 
+    Jede Stichprobe bekommt ihr eigenes, frisch aufgesetztes Ledger mit reichlich Kasse
+    (siehe FRESH_CASH) — dasselbe Muster wie in test_a3_quantisierung_1000_stichproben
+    (Fix-Runde 4). Vorher teilten sich alle 1.000 Durchläufe EIN Ledger mit
+    starting_cash=1.000.000 USDC, während die Summe der Zielbeträge (1.000 × 1.000 USDC)
+    rechnerisch exakt dort landet: gemessen blieben am Ende nur ≈408 USDC Kasse übrig
+    (0,04 % Marge) — die Prüffläche stand strukturell auf der Kante, nicht mit
+    Sicherheitsabstand. Ein Fehler, der den Verlust je Order geringfügig erhöht hätte,
+    wäre nicht als Verletzung der Invariante, sondern als zufällige INSUFFICIENT_CASH-
+    Rejection gegen Ende der Reihe sichtbar geworden — bzw. bei noch knapperer Kasse gar
+    nicht mehr, weil die Prüffläche vorher schon unter die alte Grenze (>= 500) gefallen
+    wäre, ohne dass jemand nach der Ursache gesucht hätte.
+
+    Herleitung der neuen Untergrenze (aus dem Aufbau, nicht aus dem Messwert):
+    - target_quote ist über alle 1.000 Durchläufe konstant 1.000 USDC, fee_bps=
+      slippage_bps=0 → exec_price == price (price ist bereits ein Vielfaches von
+      tick_size, tick_up ändert nichts).
+    - Der maximale Quantisierungsverlust pro Order ist höchstens
+      step_size × price ≈ 0,00001 × 81.786 ≈ 0,818 USDC (Preis läuft von 80.787 bis
+      81.786) → gross_quote liegt immer zwischen ≈999,18 und 1.000 USDC.
+    - 1.000 USDC liegt weit über min_notional=5 USDC und effective_min_notional
+      (≈5,82 USDC) → MIN_NOTIONAL/MIN_QTY können strukturell nie greifen.
+    - FRESH_CASH deckt die teuerste Einzelorder (≈1.000 USDC) um mehr als das
+      9.000-fache ab → INSUFFICIENT_CASH ist strukturell ausgeschlossen.
+    Damit müssen alle 1.000 Stichproben angenommen werden; die Grenze wird exakt bei
+    1.000 gezogen, weil der Ablauf vollständig deterministisch ist (keine Uhr, kein
+    Zufall) und jede Abweichung von 1.000 eine echte Regression wäre, keine Streuung.
+    """
     max_rest = Decimal(0)
     max_rest_pct = Decimal(0)
     akzeptiert = 0
+    rejections_sizing = rejections_ledger = 0
+    rejection_codes: Counter[str] = Counter()
+
+    # Deckt die teuerste Order (~1.000 USDC) um mehr als das 9.000-fache --
+    # Kassenknappheit ist damit je Stichprobe strukturell ausgeschlossen.
+    FRESH_CASH = Decimal("10000000")
 
     for i in range(1000):
         price = Decimal("80787") + Decimal(i) * Decimal("1")
@@ -189,14 +219,22 @@ def test_a5_losgroessenverlust_ist_beziffert():
 
         result = size_order(p, v, BTC, price, fee_bps=0.0, slippage_bps=0.0, held_qty=Decimal(0))
         if isinstance(result, Rejection):
+            rejections_sizing += 1
+            rejection_codes[f"sizing:{result.code}"] += 1
             continue
 
+        # Frisches Ledger je Stichprobe: keine geteilte, über die Iterationen
+        # auf die Kante laufende Kasse (siehe Docstring).
+        ledger = Ledger(starting_cash=FRESH_CASH, specs={"BTCUSDC": BTC},
+                         fee_bps=0.0, slippage_bps=0.0)
         candle_ts = 900_000 + i * 900_000
         candle = Candle(symbol="BTCUSDC", interval="15m", open_time=candle_ts,
                          close_time=candle_ts + 899_999, open=price, high=price, low=price,
                          close=price, volume=Decimal("1"), closed=True)
         fill = ledger.apply(result, candle)
         if isinstance(fill, Rejection):
+            rejections_ledger += 1
+            rejection_codes[f"ledger:{fill.code}"] += 1
             continue
 
         # Invariante an tatsächlichen Fill-Werten
@@ -211,7 +249,13 @@ def test_a5_losgroessenverlust_ist_beziffert():
         max_rest_pct = max(max_rest_pct, rest_pct)
         akzeptiert += 1
 
-    assert akzeptiert >= 500, f"Prüffläche zu klein: {akzeptiert} Orders akzeptiert"
+    # Prüffläche muss bei/nahe 1.000 liegen; jede Abweichung wird mit den
+    # Ablehnungscodes je Ursache gemeldet, nicht stillschweigend hingenommen.
+    assert akzeptiert == 1000, (
+        f"Prüffläche zu klein: nur {akzeptiert}/1000 Orders akzeptiert "
+        f"(Rejections: sizing={rejections_sizing}, ledger={rejections_ledger}, "
+        f"Codes={dict(rejection_codes)})"
+    )
     assert max_rest_pct < Decimal("0.1"), f"Prozentualer Verlust {max_rest_pct}% > 0.1%"
 
 
