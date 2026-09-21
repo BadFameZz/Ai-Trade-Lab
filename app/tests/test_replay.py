@@ -730,3 +730,19 @@ def test_cli_nackte_datumsangaben_sind_utc_unabhaengig_von_der_rechnerzeitzone(t
     assert utc == ausdruecklich  # nackt und ausdruecklich UTC sind dasselbe
     assert utc[1] == 97  # hergeleitet: open_time 0 .. 86_400_000 bei 900_000 ms Schritt
     assert utc[0] != _hash_fills([])  # Mindestsicherung: der Lauf war nicht leer
+
+
+def test_run_replay_lehnt_abweichenden_benchmark_symbol_frueh_ab():
+    """run_replay() ist einsymbolig (Docstring): decide_fn, execute_proposal und
+    der Benchmark laufen alle auf candles[0].symbol. Weicht benchmark_symbol
+    davon ab, kauft BuyAndHold eine Position unter dem falschen Schluessel,
+    und der erste run_replay-interne mark()-Aufruf, dem fuer diesen Schluessel
+    kein Preis mitgegeben wird, wirft tief aus ledger.py -- weit weg von der
+    eigentlichen Aufrufstelle, die den Denkfehler gemacht hat. run_replay()
+    muss den Widerspruch selbst und sofort melden."""
+    specs = {"BTCUSDC": money.BUILTIN_SPECS["BTCUSDC"], "ETHUSDC": money.BUILTIN_SPECS["ETHUSDC"]}
+    candles = _candles(10)  # alle mit symbol="BTCUSDC"
+
+    with pytest.raises(ValueError, match="benchmark_symbol"):
+        run_replay(candles, _wait_fn, CFG, specs, fee_bps=10.0, slippage_bps=5.0,
+                   benchmark_symbol="ETHUSDC", run_id="test-benchmark-mismatch")

@@ -68,11 +68,26 @@ def run_replay(
 ) -> ReplayResult:
     """Spult candles vor: decide_fn sieht nie die Fuellkerze (A-7), gebucht wird
     ausschliesslich ueber execute_proposal() (A-6b). Kill Switch loest sich an der
-    UTC-Tagesgrenze (E-008, einzige Abweichung vom Livebetrieb). Ohne conn: :memory:."""
+    UTC-Tagesgrenze (E-008, einzige Abweichung vom Livebetrieb). Ohne conn: :memory:.
+
+    run_replay() ist einsymbolig: candles, decide_fn und der Buy-&-Hold-Vergleich
+    laufen alle auf candles[0].symbol. benchmark_symbol muss deshalb mit diesem
+    Symbol uebereinstimmen (ein anderer Vergleichswert braucht einen eigenen Lauf
+    mit eigenen candles) -- sonst kauft BuyAndHold eine Position unter einem
+    Schluessel, fuer den run_replay nie einen Marktpreis mitfuehrt, und der
+    Widerspruch faellt erst spaeter und weit von hier auf, als verwirrender
+    ValueError aus Ledger.mark().
+    """
     if len(candles) < 2:
         raise ValueError("run_replay() braucht mindestens zwei Kerzen (Entscheidung + Fuellung)")
 
     symbol = candles[0].symbol
+    if benchmark_symbol != symbol:
+        raise ValueError(
+            f"run_replay() ist einsymbolig: benchmark_symbol={benchmark_symbol!r} weicht vom "
+            f"Kerzensymbol {symbol!r} ab. Ein Benchmark auf einem anderen Symbol braucht einen "
+            f"eigenen Lauf mit dessen eigenen candles."
+        )
     own_conn = conn is None
     if own_conn:
         conn = sqlite3.connect(":memory:")
