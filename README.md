@@ -52,6 +52,14 @@ pct exec <CTID> -- docker compose -f /opt/ai-trade-lab/docker-compose.yml up -d
   max. Gesamtrisiko, Tagesverlustlimit (aktiviert automatisch den Kill Switch), kein Short
 - Kill Switch aktivieren geht immer, **freigeben nur mit Admin-Token**
   (`pct exec <CTID> -- grep ADMIN_TOKEN /opt/ai-trade-lab/.env`)
+- **Der Kill Switch löst sich nicht von selbst.** Veralten die Marktdaten (Netzausfall,
+  Binance nicht erreichbar, Uhr weit daneben), setzt der Poller ihn — und er bleibt gesetzt,
+  auch nachdem die Störung vorbei ist, bis jemand mit dem Admin-Token freigibt. Das ist
+  beabsichtigt: eine Sicherung, die sich selbst zurücksetzt, hat schon einmal nicht
+  gesichert. Für den Alleinbetrieb heißt das aber: ein Ausfall um 03:00 Uhr legt das
+  Papierhandeln still, bis Sie freigeben. Nach dem Freigeben läuft es sofort weiter, sofern
+  `GET /api/status` unter `market_data.status` wieder `ok` zeigt; steht dort noch `stale`,
+  setzt der nächste Poll-Zyklus den Kill Switch erneut.
 - Container: Nicht-root, read-only, keine Capabilities, kein Zugriff auf den Proxmox-Host
 - Das Dashboard hat **keinen Login** → nur im Heimnetz betreiben, keinen Port nach außen freigeben
 - **Achtung IPv6:** An einem Dual-Stack-Anschluss bekommt der Container zusätzlich zur

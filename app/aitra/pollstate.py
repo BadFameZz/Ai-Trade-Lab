@@ -27,8 +27,14 @@ from .replay import _utc_date as utc_tag
 def check_staleness(cfg: Config, clock: Clock, latest_close_time_ms: int | None,
                      server_time_ms: int | None) -> Staleness:
     """Duenner Wrapper um marketdata.staleness() mit den konfigurierten
-    Schwellen - eigene Funktion, damit A-11/A-11b/A-12 sie ohne Netz, ohne DB
-    und ohne Thread direkt aufrufen koennen (siehe test_marketdata.py, A1)."""
+    Schwellen: er uebersetzt Config-Felder in Argumente, mehr nicht.
+
+    Hier stand bis zum Nachreview der Gesamt-Fixrunde A2, A-11/A-11b/A-12
+    riefen diese Funktion direkt auf (mit Verweis auf test_marketdata.py).
+    Gemessen: das stimmt nicht - ausserhalb dieses Moduls und poll_once()
+    ruft sie niemand auf, und test_marketdata.py benutzt
+    marketdata.staleness() unmittelbar. Der Text ist beim Verschieben aus
+    poller.py mitgewandert; korrigiert statt weitergereicht."""
     return staleness(
         clock, latest_close_time_ms, server_time_ms, interval_seconds(cfg.market_interval),
         warn_s=cfg.market_stale_warn_s, kill_s=cfg.market_stale_kill_s,

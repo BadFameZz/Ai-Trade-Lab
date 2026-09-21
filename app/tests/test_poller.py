@@ -14,7 +14,7 @@ import pytest
 from aitra import db, money, poller, store, store_run
 from aitra.binance import BinanceClient
 from aitra.config import Config
-from aitra.marketdata import SimClock, WallClock
+from aitra.marketdata import SimClock, WallClock, projizierte_serverzeit
 
 BASIS = "https://api.binance.com"
 SPECS = {"BTCUSDC": money.BUILTIN_SPECS["BTCUSDC"]}
@@ -929,3 +929,127 @@ def test_v7_candle_retention_days_wirkt_im_livepfad(tmp_path):
         f"CANDLE_RETENTION_DAYS=7 haette die 40 Tage aeltere Kerze loeschen muessen, "
         f"gemessen: {uebrig}"
     )
+
+
+def test_b2_nach_neustart_fuellt_die_alte_kerze_immer_noch_nicht(tmp_path):
+    """B-2, der Pfad, den erst der Nachreview gefunden hat.
+
+    Keiner der urspruenglichen B-2-Nachweise war eigenstaendig: V-6 verdeckt
+    B-2 im Dauerbetrieb. Seit "nur wirklich neue Kerzen" steht dieselbe Kerze
+    im Folgezyklus nicht mehr in neue_kerzen, also wird resolve_pending() gar
+    nicht mehr gerufen - mit entferntem B-2-Fix blieb das Szenario gruen.
+
+    Eigenstaendig wird B-2 ueber den NEUSTART: pc.last_close_time lebt nur im
+    Speicher. Ein frisch gebauter PollerContext haelt dieselbe alte Kerze fuer
+    neu, ruft resolve_pending() - und ohne die Grenze fuellt er zum open einer
+    Kerze, die 899.999 ms VOR der Entscheidung geoeffnet hat.
+
+    Zwei Schichten schuetzen dieselbe Eigenschaft, und nur eine war geprueft.
+    Ohne diesen Test sieht die B-2-Grenze beim naechsten Umbau an V-6 wie
+    redundant aus und faellt raus."""
+    from aitra.execute import execute_proposal
+    from aitra.risk import Proposal
+
+    K1145 = 89_100_000                      # open_time, close_time 89_999_999
+    clock = SimClock(90_120_000)            # 12:02
+    kerzen = {"BTCUSDC": [_kerze_oc(K1145, "80040.00", "80500.00")]}
+
+    def klines(url):
+        return FakeAntwort(_body(kerzen["BTCUSDC"]))
+
+    def zeit(url):
+        return FakeAntwort(_body({"serverTime": clock.now_ms()}))
+
+    opener = FakeOpener({"/api/v3/klines": klines, "/api/v3/time": zeit})
+    conn = db.connect(tmp_path / "a.db")
+    db.migrate(conn)
+
+    pc1 = poller.build_context(conn, _cfg(tmp_path), SPECS, clock=clock,
+                                client=BinanceClient(BASIS, opener=opener))
+    assert poller.poll_once(pc1).fills == [], "Pruefflaeche: erster Zyklus bucht nichts"
+    pending = execute_proposal(
+        Proposal("BTCUSDC", "BUY", 8), pc1.ctx, marks={}, ts_ms=K1145 + 899_999,
+        ref_price=Decimal("80500.00"), start_of_day_equity=Decimal("10000"), next_candle=None,
+    )
+    assert pending.status == "pending_fill", f"Pruefflaeche: {pending}"
+
+    # --- Neustart: neuer Prozess, neuer Kontext, leeres last_close_time -----
+    clock.set(90_300_000)  # 12:05, noch weit vor pending_expiry_ms
+    pc2 = poller.build_context(conn, _cfg(tmp_path), SPECS, clock=clock,
+                                client=BinanceClient(BASIS, opener=opener))
+    assert pc2.last_close_time == {}, "Pruefflaeche: der Neustart muss das Gedaechtnis leeren"
+
+    outcome = poller.poll_once(pc2)
+
+    assert outcome.fills == [], (
+        "nach dem Neustart auf der alten Kerze gefuellt: "
+        + ", ".join(f"{f.symbol} {f.qty}@{f.price} (open_time {f.candle_open_time})"
+                    for f in outcome.fills)
+    )
+    assert conn.execute("SELECT COUNT(*) c FROM fills").fetchone()["c"] == 0
+    row = conn.execute("SELECT pending_since_ms FROM decisions WHERE id=?",
+                        (pending.decision_id,)).fetchone()
+    assert row["pending_since_ms"] == K1145 + 899_999, (
+        "Die Zeile muss schwebend BLEIBEN - sie wartet auf eine wirklich spaetere Kerze"
+    )
+
+
+@pytest.mark.parametrize("uhrversatz_ms", [-7_000_000, 0, 7_000_000])
+def test_n2_projizierte_serverzeit_ueberschreitet_die_wahre_serverzeit_nie(tmp_path, uhrversatz_ms):
+    """N-2 (Nachreview): die Reihenfolge in poll_once() ist tragend.
+
+        pc.last_server_time_ms = pc.client.server_time()
+        pc.last_time_check_ms  = pc.clock.now_ms()      # NACH dem Aufruf
+
+    Die Antwort traegt die Serverzeit aus dem Moment ihrer Erzeugung; die
+    lokale Marke wird gesetzt, wenn sie ANGEKOMMEN ist. Die Projektion liegt
+    damit immer genau eine RUECKlaufzeit hinter der wahren Serverzeit - und
+    zwar unabhaengig davon, wie weit die Containeruhr absolut danebenliegt:
+    der echte Uhrversatz kuerzt sich exakt heraus. Genau diese Marge macht es
+    unbedenklich, dieselbe Zahl auch als klines-Grenze zu benutzen (dort
+    entscheidet close_time >= server_time_ms darueber, ob eine Kerze als
+    laufend verworfen wird).
+
+    Vertauscht man die zwei Zeilen, wird aus der Marge ihr Gegenteil: die
+    Projektion laeuft der Serverzeit um die HINlaufzeit voraus, und eine
+    unfertige Kerze kann als geschlossen durchgehen. Vertauscht gemessen:
+    279 passed, kein einziger Test schlug an - deshalb dieser hier.
+
+    Der Testdouble rueckt die Uhr WAEHREND des server_time()-Aufrufs vor,
+    einmal fuer den Hinweg und einmal fuer den Rueckweg. Der grosse
+    uhrversatz_ms laesst die Veraltet-Erkennung ausschlagen - richtig so, aber
+    nicht Gegenstand dieses Tests; zugesichert wird allein die Projektion."""
+    HIN_MS, RUECK_MS = 40, 60
+
+    clock = SimClock(90_200_000)
+
+    def zeit(url):
+        clock.set(clock.now_ms() + HIN_MS)                 # Anfrage unterwegs
+        erzeugt = clock.now_ms() + uhrversatz_ms           # Serverzeit im Moment der Erzeugung
+        clock.set(clock.now_ms() + RUECK_MS)               # Antwort unterwegs
+        return FakeAntwort(_body({"serverTime": erzeugt}))
+
+    def klines(url):
+        grenze = ((clock.now_ms() + uhrversatz_ms) // 900_000) * 900_000
+        return FakeAntwort(_body([_kerze(grenze - 2 * 900_000, 900)]))
+
+    client = BinanceClient(BASIS, opener=FakeOpener({"/api/v3/klines": klines, "/api/v3/time": zeit}))
+    conn = db.connect(tmp_path / "a.db")
+    db.migrate(conn)
+    pc = poller.build_context(conn, _cfg(tmp_path), SPECS, clock=clock, client=client)
+
+    poller.poll_once(pc)
+
+    for vergangen_ms in (0, 60_000, 300_000, 899_000):
+        clock.set(clock.now_ms() + vergangen_ms)
+        projiziert = projizierte_serverzeit(clock, pc.last_server_time_ms, pc.last_time_check_ms)
+        wahr = clock.now_ms() + uhrversatz_ms
+        assert projiziert <= wahr, (
+            f"Projektion laeuft der Serverzeit voraus (Uhrversatz {uhrversatz_ms} ms, "
+            f"{vergangen_ms} ms nach der Messung): projiziert {projiziert}, wahr {wahr}, "
+            f"Vorsprung {projiziert - wahr} ms"
+        )
+        assert wahr - projiziert == RUECK_MS, (
+            f"Die Marge muss genau die Ruecklaufzeit sein und nicht vom Uhrversatz "
+            f"({uhrversatz_ms} ms) abhaengen, gemessen: {wahr - projiziert} ms"
+        )

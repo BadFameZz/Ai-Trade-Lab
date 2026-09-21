@@ -66,6 +66,20 @@ def poll_once(pc: PollerContext) -> PollOutcome:
     zeit_fehlgeschlagen = False
     if need_time:
         try:
+            # N-2: Die Reihenfolge dieser ZWEI Zeilen ist tragend, nicht
+            # kosmetisch. Die Antwort traegt die Serverzeit aus dem Moment
+            # ihrer Erzeugung; die lokale Marke wird gesetzt, wenn sie
+            # ANGEKOMMEN ist. projizierte_serverzeit() liegt damit immer genau
+            # eine RUECKlaufzeit HINTER der wahren Serverzeit - unabhaengig
+            # davon, wie weit die Containeruhr absolut danebenliegt (der echte
+            # Uhrversatz kuerzt sich exakt heraus). Genau diese Marge macht es
+            # unbedenklich, dieselbe Zahl als klines-Grenze zu benutzen, wo
+            # close_time >= server_time_ms die laufende Kerze verwirft.
+            # Vertauscht laeuft die Projektion der Serverzeit um die
+            # HINlaufzeit VORAUS, und eine unfertige Kerze kann als
+            # geschlossen durchgehen. Vertauscht gemessen: 279 passed, kein
+            # Test schlug an - deshalb
+            # test_n2_projizierte_serverzeit_ueberschreitet_die_wahre_serverzeit_nie.
             pc.last_server_time_ms = pc.client.server_time()
             pc.last_time_check_ms = pc.clock.now_ms()
         except BinanceError as e:

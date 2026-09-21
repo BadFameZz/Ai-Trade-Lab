@@ -135,3 +135,45 @@ def test_web_und_dashboard_sind_wirklich_getrennt():
     assert ueberschneidung == set(), (
         f"Funktionsnamen in web.py UND dashboard.py definiert: {sorted(ueberschneidung)}"
     )
+
+
+def test_poller_und_pollstate_sind_wirklich_getrennt():
+    """N-1 (Nachreview der Gesamt-Fixrunde A2): die dritte Naht war ohne
+    Waechter ausgeliefert. store/store_run hat einen, web/dashboard hat einen -
+    poller/pollstate nicht. Der Reviewer hat eine BYTE-GLEICHE Zweitfassung
+    von tageswechsel() in poller.py definiert: 279 passed, gruen.
+
+    Der Re-Export verschaerft das. poller.py importiert die fuenf Namen aus
+    pollstate.py; eine spaeter im Modul definierte Funktion gleichen Namens
+    ueberschattet den Import LAUTLOS. poll_once() benutzt dann die eine, ein
+    Test gegen pollstate die andere - und beide sehen von aussen gleich aus.
+
+    Gebaut wie test_web_und_dashboard_sind_wirklich_getrennt: symmetrisch
+    ueber Namensmengen per ast, keine gepflegte Liste. Zusaetzlich die
+    Identitaetspruefung fuer die re-exportierten Namen - sie ist die zweite
+    Schicht gegen genau die Ueberschattung, die dieser Naht eigen ist.
+
+    Die Naht: pollstate.py traegt den Zustand eines Live-Laufs und die drei
+    Funktionen, die ihn feststellen und festschreiben; poller.py faehrt den
+    Zyklus (poll_once, build_context) und seinen Thread (run_forever, start).
+    """
+    from aitra import poller, pollstate
+
+    reexportiert = ["PollerContext", "PollOutcome", "check_staleness",
+                    "apply_staleness", "tageswechsel"]
+    fehlend = [n for n in reexportiert if not hasattr(pollstate, n)]
+    assert fehlend == [], f"fehlt in pollstate.py: {fehlend}"
+
+    poller_namen = _alle_funktionsnamen(Path(poller.__file__))
+    pollstate_namen = _alle_funktionsnamen(Path(pollstate.__file__))
+    ueberschneidung = poller_namen & pollstate_namen
+    assert ueberschneidung == set(), (
+        f"Funktionsnamen in poller.py UND pollstate.py definiert: {sorted(ueberschneidung)}"
+    )
+
+    verschieden = [n for n in reexportiert
+                   if getattr(poller, n, None) is not getattr(pollstate, n)]
+    assert verschieden == [], (
+        f"poller.{{{', '.join(verschieden)}}} ist nicht mehr der re-exportierte Name aus "
+        f"pollstate.py - eine lokale Definition ueberschattet den Import"
+    )

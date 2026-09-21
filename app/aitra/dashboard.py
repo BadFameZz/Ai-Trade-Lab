@@ -145,6 +145,15 @@ def build_status(conn: sqlite3.Connection, cfg: Config) -> dict:
         for s, p in rohe_positionen.items() if p["qty"] != 0
     ]
     bench_equity = curve[-1]["benchmark_equity"] if curve else None
+    # Max Drawdown wird ueber die ganze Kurve nachgerechnet (V-6, zweiter
+    # Teil, bewusst NICHT umgebaut): ein SQL-Aggregat braeuchte
+    # MAX(equity) OVER (...) und damit CAST(equity AS REAL) - Geld durch
+    # float, gegen die harte Randbedingung. Falls es je dringend wird, geht
+    # es ohne float: den Hoechststand FORTSCHREIBEN statt nachrechnen, als
+    # kanonischer TEXT in `state` - dieselbe Mechanik, die V-1 fuer
+    # sod_equity/sod_date eingefuehrt hat (Vorschlag des Nachreviews).
+    # Heute nicht noetig: seit V-6 entstehen 35.040 Punkte im Jahr statt
+    # 525.600, limit=100_000 deckt damit rund 2,8 Jahre.
     max_dd = Decimal(0)
     peak = curve[0]["equity"] if curve else None
     for pt in curve:
