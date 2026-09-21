@@ -123,8 +123,10 @@ Eine abgeleitete, keine von Binance genannte Zahl. Sie gehört in die Fehlermeld
 
 **K-4 — Reibung: Gebühren dominieren, Slippage ist Beiwerk.**
 Roundtrip-Gebühr = 20 bp. Die gemessenen Halb-Spannen sind 0,062 bp (BTC) und 0,063 bp (BNB),
-die Tiefe an der Spitze (19.400 bzw. 40.977 USDC) trägt jede Order dieses Labors — auch die
-größte mit 1.000 USDC — ohne das Buch zu bewegen. Realistische Slippage ist also **rund
+die gemessene Tiefe an der Spitze bei BTCUSDC (19.400 USDC) trägt jede Order dieses Labors — auch die
+größte mit 1.000 USDC — ohne das Buch zu bewegen. Für BNBUSDC wurde die Tiefe am
+2026-09-21 **nicht erhoben**; die Halb-Spanne von 0,063 bp liegt aber praktisch gleichauf
+mit BTCUSDC. Realistische Slippage ist also **rund
 0,06 bp, nicht 5 bp**. Die Vorgabe von 5 bp (Abschnitt 6.3) ist ein bewusster
 Sicherheitsaufschlag von 50 % auf die Gesamtreibung — begründet, nicht gemessen, und als
 solcher gekennzeichnet.
