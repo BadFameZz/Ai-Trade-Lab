@@ -73,6 +73,34 @@ Sobald `poller.py` entsteht, ist `resolve_pending()` der reguläre Live-Füllweg
 **→ Dieses Dokument ist ein Blocker für Teilprojekt A2: zu lösen, bevor `poller.py`
 `resolve_pending()` aufruft.**
 
+## Verwandter Befund: `_last_marks` ist nach einem Neustart leer
+
+Derselbe Zeilenblock hat eine zweite, schärfere Ausprägung, die erst beim Poller in A2 entsteht.
+Ein neu gestarteter Live-Prozess hat kein Gedächtnis aus der letzten Laufzeit: Positionen werden
+beim Start aus dem Journal (`fills`/`positions`, siehe A-14) in ein frisches `Ledger` geladen, und
+`Ledger._last_marks` beginnt dabei zwangsläufig leer (`{}`) — es ist reiner In-Prozess-Zustand,
+nirgends persistiert. Trifft danach die erste Folgekerze für ein *anderes* Symbol als das
+soeben rekonstruierte ein, rechnet `resolve_pending()` weiterhin
+
+```python
+marks = {**ctx.ledger.last_marks, candle.symbol: candle.open}
+valuation = ctx.ledger.mark(marks, ts_ms=ctx.clock.now_ms())
+```
+
+— und `ctx.ledger.last_marks` liefert für die gehaltene, aber in dieser Prozesslaufzeit noch nie
+bepreiste Position schlicht nichts. `Ledger.mark()` verlangt bewusst einen Preis für jede gehaltene
+Position (Docstring in `ledger.py:183`) und wirft sofort: `Kein Marktpreis für gehaltene Position
+… mark() erhielt Preise für […]`. Das ist keine neue Fehlerquelle, sondern dieselbe Wurzel wie
+oben (Bewertung mit unvollständigen Preisen) in ihrer schärfsten Form: nicht nur *veraltet*
+(Füllkerze statt Vorschlagszeit), sondern nach einem Neustart mit mehr als einem gehandelten
+Symbol *zunächst gar nicht vorhanden*.
+
+Gehört zur selben Frage — **Weg A** oben löst auch dieses Problem, weil eine bei Vorschlagszeit
+gespeicherte, fertig bemessene Order bei der Auflösung keine vollständige `valuation` mehr
+braucht — und **muss ebenfalls vor dem Poller in A2 gelöst sein**: sonst wirft der allererste
+Fill-Versuch nach jedem Neustart eine schwer zu deutende `ValueError`, sobald der Live-Prozess
+mehr als ein Symbol hält.
+
 ## Die zwei Wege
 
 | Weg | Was zu tun ist | Preis |
