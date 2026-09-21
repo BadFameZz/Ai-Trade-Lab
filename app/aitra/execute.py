@@ -1,0 +1,163 @@
+"""execute_proposal(): das Nadeloehr (E-003).
+
+Die einzige Funktion im Paket, die Ledger.apply() aufruft (A-6b) — verbindet
+RiskEngine.check() -> sizing.size_order() -> Ledger.apply() -> Journal (decisions/fills).
+Verwaltet zusaetzlich schwebende Vorschlaege (E-006): Ohne next_candle wird der
+Vorschlag als pending_fill abgelegt, bis resolve_pending() eine Folgekerze liefert
+oder expire_stale_pending() ihn nach pending_expiry_ms verwerfen laesst.
+"""
+from __future__ import annotations
+
+import sqlite3
+from dataclasses import dataclass
+from decimal import Decimal
+from typing import Mapping
+
+from . import db, money, store
+from .ledger import Fill, Ledger, Rejection
+from .marketdata import Candle, Clock
+from .risk import Proposal, RiskEngine
+from .sizing import size_order
+
+PENDING_EXPIRY_MS_DEFAULT = 1_800_000  # 2 * interval_s bei 15m (E-006)
+
+
+@dataclass
+class ExecutionContext:
+    """Nicht frozen: kill_switch (und engine, in Tests) werden vom Aufrufer je
+    nach Betriebsart aktualisiert, ohne den Kontext neu aufzubauen."""
+    conn: sqlite3.Connection
+    run_id: str
+    ledger: Ledger
+    engine: RiskEngine
+    specs: Mapping[str, money.SymbolSpec]
+    fee_bps: float
+    slippage_bps: float
+    clock: Clock
+    kill_switch: bool = False
+    pending_expiry_ms: int = PENDING_EXPIRY_MS_DEFAULT
+
+
+@dataclass(frozen=True)
+class ExecutionResult:
+    decision_id: int
+    approved: bool
+    code: str
+    reason: str
+    status: str  # "filled" | "rejected" | "pending_fill" | "no_order"
+    fill: Fill | None = None
+
+
+def _journal_fill(ctx: ExecutionContext, decision_id: int, fill: Fill) -> None:
+    fill_id = store.insert_fill(
+        ctx.conn, run_id=ctx.run_id, decision_id=decision_id, symbol=fill.symbol, side=fill.side,
+        candle_open_time=fill.candle_open_time, price=fill.price, qty=fill.qty,
+        gross_quote=fill.gross_quote, fee=fill.fee, net_quote=fill.net_quote,
+        cash_after=fill.cash_after, fee_bps=fill.fee_bps, slippage_bps=fill.slippage_bps,
+        ts=db.now(),
+    )
+    store.resolve_decision(ctx.conn, decision_id, fill_id)
+    pos = ctx.ledger.position(fill.symbol)
+    store.upsert_position(ctx.conn, run_id=ctx.run_id, symbol=fill.symbol, qty=pos.qty,
+                           avg_price=pos.avg_price, realized_pnl=pos.realized_pnl, updated_at=db.now())
+
+
+def execute_proposal(
+    proposal: Proposal,
+    ctx: ExecutionContext,
+    *,
+    marks: Mapping[str, Decimal],
+    ts_ms: int,
+    ref_price: Decimal,
+    start_of_day_equity: Decimal,
+    strategy_version: str = "manual",
+    reason: str = "",
+    next_candle: Candle | None = None,
+) -> ExecutionResult:
+    """Das Nadeloehr: RiskEngine.check() -> sizing.size_order() -> Ledger.apply().
+
+    Jede Entscheidung wird protokolliert (auch Ablehnungen, A-6). Nur ein
+    genehmigter, erfolgreich bemessener Vorschlag erreicht Ledger.apply() — und
+    zwar ausschliesslich hier (A-6b). ref_price ist der Preis der aktuellen
+    (Entscheidungs-)Kerze; next_candle liefert, falls bekannt, die Folgekerze,
+    zu deren open tatsaechlich gefuellt wird (E-006).
+    """
+    valuation = ctx.ledger.mark(marks, ts_ms)
+    pf = ctx.ledger.to_portfolio_state(valuation, start_of_day_equity)
+    decision = ctx.engine.check(proposal, pf, ctx.kill_switch)
+
+    decision_id = db.add_decision(
+        ctx.conn, strategy_version=strategy_version, symbol=proposal.symbol,
+        action=proposal.action, confidence=proposal.confidence, reason=reason,
+        requested_position_pct=proposal.position_pct, approved=int(decision.approved),
+        risk_code=decision.code, risk_reason=decision.reason,
+    )
+    ctx.conn.execute("UPDATE decisions SET run_id = ? WHERE id = ?", (ctx.run_id, decision_id))
+    ctx.conn.commit()
+
+    if proposal.action.upper() == "WAIT":
+        return ExecutionResult(decision_id, decision.approved, decision.code, decision.reason, status="no_order")
+    if not decision.approved:
+        return ExecutionResult(decision_id, False, decision.code, decision.reason, status="rejected")
+
+    spec = ctx.specs.get(proposal.symbol)
+    if spec is None:
+        return ExecutionResult(decision_id, False, "NO_SPEC", f"Keine SymbolSpec für {proposal.symbol}",
+                                status="rejected")
+
+    held = ctx.ledger.position(proposal.symbol).qty
+    order = size_order(proposal, valuation, spec, ref_price, ctx.fee_bps, ctx.slippage_bps, held)
+    if isinstance(order, Rejection):
+        return ExecutionResult(decision_id, False, order.code, order.reason, status="rejected")
+
+    if next_candle is None:
+        # E-006, live: Folgekerze liegt noch nicht vor -> schwebend
+        store.mark_decision_pending(ctx.conn, decision_id, pending_since_ms=ts_ms)
+        return ExecutionResult(decision_id, True, "OK", "Order schwebt bis zur Folgekerze", status="pending_fill")
+
+    fill = ctx.ledger.apply(order, next_candle)
+    if isinstance(fill, Rejection):
+        return ExecutionResult(decision_id, False, fill.code, fill.reason, status="rejected")
+
+    _journal_fill(ctx, decision_id, fill)
+    return ExecutionResult(decision_id, True, "OK", "Gefüllt", status="filled", fill=fill)
+
+
+def resolve_pending(ctx: ExecutionContext, candle: Candle) -> list[Fill]:
+    """Fuellt schwebende Vorschlaege fuer candle.symbol mit der nun vorliegenden Kerze."""
+    expire_stale_pending(ctx)
+    filled: list[Fill] = []
+    for row in store.get_pending_decisions(ctx.conn, ctx.run_id):
+        if row["symbol"] != candle.symbol:
+            continue
+        spec = ctx.specs.get(row["symbol"])
+        if spec is None:
+            store.expire_decision(ctx.conn, row["id"])
+            continue
+        held = ctx.ledger.position(row["symbol"]).qty
+        proposal = Proposal(symbol=row["symbol"], action=row["action"],
+                             position_pct=row["requested_position_pct"] or 0.0)
+        valuation = ctx.ledger.mark({row["symbol"]: candle.open}, ts_ms=ctx.clock.now_ms())
+        order = size_order(proposal, valuation, spec, candle.open, ctx.fee_bps, ctx.slippage_bps, held)
+        if isinstance(order, Rejection):
+            store.expire_decision(ctx.conn, row["id"])
+            continue
+        fill = ctx.ledger.apply(order, candle)
+        if isinstance(fill, Rejection):
+            store.expire_decision(ctx.conn, row["id"])
+            continue
+        _journal_fill(ctx, row["id"], fill)
+        filled.append(fill)
+    return filled
+
+
+def expire_stale_pending(ctx: ExecutionContext) -> list[int]:
+    """Laesst schwebende Vorschlaege verfallen, die laenger als pending_expiry_ms
+    schweben — unabhaengig davon, ob je eine passende Kerze eintrifft (E-006)."""
+    now = ctx.clock.now_ms()
+    expired: list[int] = []
+    for row in store.get_pending_decisions(ctx.conn, ctx.run_id):
+        if now - row["pending_since_ms"] > ctx.pending_expiry_ms:
+            store.expire_decision(ctx.conn, row["id"])
+            expired.append(row["id"])
+    return expired
