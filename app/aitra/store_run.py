@@ -30,6 +30,19 @@ def create_run(conn: sqlite3.Connection, run_id: str, kind: str, started_at: str
     conn.commit()
 
 
+def ensure_run(conn: sqlite3.Connection, run_id: str, kind: str, started_at: str,
+               code_version: str) -> None:
+    """Wie create_run(), aber idempotent: der Live-Lauf 'live' entsteht beim
+    ersten Prozessstart und ueberlebt jeden weiteren Neustart unveraendert -
+    ein zweites create_run() wuerde an runs.run_id (PRIMARY KEY) scheitern."""
+    conn.execute(
+        "INSERT OR IGNORE INTO runs (run_id, kind, started_at, code_version, params_json) "
+        "VALUES (?, ?, ?, ?, '{}')",
+        (run_id, kind, started_at, code_version),
+    )
+    conn.commit()
+
+
 def finish_run(conn: sqlite3.Connection, run_id: str, finished_at: str) -> None:
     conn.execute("UPDATE runs SET finished_at = ? WHERE run_id = ?", (finished_at, run_id))
     conn.commit()

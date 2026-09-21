@@ -119,3 +119,47 @@ def test_market_symbols_aus_der_umgebung_und_grenzen(monkeypatch, tmp_path):
     monkeypatch.setenv("MARKET_SYMBOLS", "A1USDC,A2USDC,A3USDC,A4USDC,A5USDC,A6USDC")
     with pytest.raises(ConfigError):
         load()
+
+
+def test_market_poller_config_defaults(monkeypatch, tmp_path):
+    _base_env(monkeypatch, tmp_path)
+    for var in ("MARKET_DATA_ENABLED", "MARKET_INTERVAL", "MARKET_POLL_S",
+                "MARKET_STALE_WARN_S", "MARKET_STALE_KILL_S", "MARKET_CLOCK_SKEW_WARN_S",
+                "MARKET_CLOCK_SKEW_KILL_S", "FEE_BPS", "SLIPPAGE_BPS", "BENCHMARK_SYMBOL",
+                "CANDLE_RETENTION_DAYS"):
+        monkeypatch.delenv(var, raising=False)
+    cfg = load()
+    assert cfg.market_data_enabled is False
+    assert cfg.market_interval == "15m"
+    assert cfg.market_poll_s == 60
+    assert cfg.market_stale_warn_s == 150
+    assert cfg.market_stale_kill_s == 300
+    assert cfg.market_clock_skew_warn_s == 5
+    assert cfg.market_clock_skew_kill_s == 30
+    assert cfg.fee_bps == 10.0
+    assert cfg.slippage_bps == 5.0
+    assert cfg.benchmark_symbol == "BTCUSDC"
+    assert cfg.candle_retention_days == 400
+
+
+def test_market_interval_wird_gegen_die_erlaubte_menge_geprueft(monkeypatch, tmp_path):
+    _base_env(monkeypatch, tmp_path)
+    monkeypatch.setenv("MARKET_INTERVAL", "7m")
+    with pytest.raises(ConfigError):
+        load()
+
+
+def test_market_data_enabled_akzeptiert_nur_bool_text(monkeypatch, tmp_path):
+    _base_env(monkeypatch, tmp_path)
+    monkeypatch.setenv("MARKET_DATA_ENABLED", "yes")
+    with pytest.raises(ConfigError):
+        load()
+    monkeypatch.setenv("MARKET_DATA_ENABLED", "true")
+    assert load().market_data_enabled is True
+
+
+def test_benchmark_symbol_wird_gegen_symbol_re_geprueft(monkeypatch, tmp_path):
+    _base_env(monkeypatch, tmp_path)
+    monkeypatch.setenv("BENCHMARK_SYMBOL", "btc-usdc")
+    with pytest.raises(ConfigError):
+        load()

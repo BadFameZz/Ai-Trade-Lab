@@ -42,6 +42,17 @@ class Config:
     live_locked: bool = True
     binance_base_url: str = "https://api.binance.com"
     market_symbols: tuple[str, ...] = ("BTCUSDC", "BNBUSDC")
+    market_data_enabled: bool = False
+    market_interval: str = "15m"
+    market_poll_s: int = 60
+    market_stale_warn_s: int = 150
+    market_stale_kill_s: int = 300
+    market_clock_skew_warn_s: int = 5
+    market_clock_skew_kill_s: int = 30
+    fee_bps: float = 10.0
+    slippage_bps: float = 5.0
+    benchmark_symbol: str = "BTCUSDC"
+    candle_retention_days: int = 400
 
 
 def _num(name: str, default: float, lo: float, hi: float) -> float:
@@ -120,6 +131,41 @@ def _symbols(name: str = "MARKET_SYMBOLS", default: str = "BTCUSDC,BNBUSDC") -> 
     return teile
 
 
+def _bool(name: str, default: bool) -> bool:
+    raw = os.getenv(name, "true" if default else "false").strip().lower()
+    if raw not in {"true", "false", "1", "0"}:
+        raise ConfigError(f"{name}={raw!r} muss true/false sein")
+    return raw in {"true", "1"}
+
+
+def _interval(name: str = "MARKET_INTERVAL", default: str = "15m") -> str:
+    from .marketdata import INTERVALS  # lokal: marketdata importiert nichts aus config, aber
+                                        # Konsistenz mit dem lokalen Import-Muster von _symbols()
+    raw = os.getenv(name, default).strip()
+    if raw not in INTERVALS:
+        raise ConfigError(f"{name}={raw!r} nicht in {sorted(INTERVALS)}")
+    return raw
+
+
+def _int_range(name: str, default: int, lo: int, hi: int) -> int:
+    raw = os.getenv(name, str(default)).strip()
+    try:
+        val = int(raw)
+    except ValueError as e:
+        raise ConfigError(f"{name}={raw!r} ist keine Ganzzahl") from e
+    if not (lo <= val <= hi):
+        raise ConfigError(f"{name}={val} liegt außerhalb ({lo} ≤ x ≤ {hi})")
+    return val
+
+
+def _benchmark_symbol(name: str = "BENCHMARK_SYMBOL", default: str = "BTCUSDC") -> str:
+    from .risk import SYMBOL_RE
+    raw = os.getenv(name, default).strip().upper()
+    if not SYMBOL_RE.match(raw):
+        raise ConfigError(f"{name}={raw!r} ungültig")
+    return raw
+
+
 def _admin_token(data_dir: Path) -> str:
     env = os.getenv("ADMIN_TOKEN", "").strip()
     if env:
@@ -158,6 +204,22 @@ def load() -> Config:
 
     market_symbols = _symbols()
 
+    market_data_enabled = _bool("MARKET_DATA_ENABLED", False)
+    market_interval = _interval()
+    market_poll_s = _int_range("MARKET_POLL_S", 60, 10, 300)
+    market_stale_warn_s = _int_range("MARKET_STALE_WARN_S", 150, 30, 3600)
+    market_stale_kill_s = _int_range("MARKET_STALE_KILL_S", 300, 60, 86400)
+    if market_stale_kill_s <= market_stale_warn_s:
+        raise ConfigError("MARKET_STALE_KILL_S muss größer als MARKET_STALE_WARN_S sein")
+    market_clock_skew_warn_s = _int_range("MARKET_CLOCK_SKEW_WARN_S", 5, 1, 60)
+    market_clock_skew_kill_s = _int_range("MARKET_CLOCK_SKEW_KILL_S", 30, 5, 600)
+    if market_clock_skew_kill_s <= market_clock_skew_warn_s:
+        raise ConfigError("MARKET_CLOCK_SKEW_KILL_S muss größer als MARKET_CLOCK_SKEW_WARN_S sein")
+    fee_bps = _num("FEE_BPS", 10, 0, 100)
+    slippage_bps = _num("SLIPPAGE_BPS", 5, 0, 200)
+    benchmark_symbol = _benchmark_symbol()
+    candle_retention_days = _int_range("CANDLE_RETENTION_DAYS", 400, 7, 3650)
+
     return Config(
         starting_balance=starting_balance,
         max_position_pct=max_position_pct,
@@ -167,4 +229,15 @@ def load() -> Config:
         admin_token=_admin_token(data_dir),
         binance_base_url=binance_base_url,
         market_symbols=market_symbols,
+        market_data_enabled=market_data_enabled,
+        market_interval=market_interval,
+        market_poll_s=market_poll_s,
+        market_stale_warn_s=market_stale_warn_s,
+        market_stale_kill_s=market_stale_kill_s,
+        market_clock_skew_warn_s=market_clock_skew_warn_s,
+        market_clock_skew_kill_s=market_clock_skew_kill_s,
+        fee_bps=fee_bps,
+        slippage_bps=slippage_bps,
+        benchmark_symbol=benchmark_symbol,
+        candle_retention_days=candle_retention_days,
     )

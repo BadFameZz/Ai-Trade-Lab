@@ -137,7 +137,22 @@ def now() -> str:
 
 
 def connect(path: Path) -> sqlite3.Connection:
-    conn = sqlite3.connect(path, timeout=10)
+    """Oeffnet eine SQLite-Verbindung.
+
+    check_same_thread=False (Fixrunde 1, Aufgabe 5/poller.py, gemessen): der
+    Live-Poller wird in einem eigenen Thread gestartet, dem der Aufrufer eine
+    bereits offene Verbindung UEBERGIBT (poller.start(conn, ...)). Mit dem
+    Python-Standard (check_same_thread=True) wirft jeder einzelne
+    db.get_state()/db.log_event()-Aufruf aus diesem Thread sofort
+    sqlite3.ProgrammingError - und run_forever() faengt das ab und geht in
+    Backoff, wodurch der Poller niemals einen einzigen erfolgreichen Zyklus
+    faehrt, aber auch nie sichtbar abstuerzt (stiller Totalausfall). Sicher,
+    weil jede Verbindung dieser Funktion in genau EINEM Thread benutzt wird
+    (dem, der sie haelt) - nur eben nicht zwingend demselben, der sie erzeugt
+    hat; SQLite selbst ist im Standard-Threading-Modus (serialized) fuer
+    mehrere Verbindungen auf dieselbe Datei ohnehin ausgelegt (WAL-Modus).
+    """
+    conn = sqlite3.connect(path, timeout=10, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")

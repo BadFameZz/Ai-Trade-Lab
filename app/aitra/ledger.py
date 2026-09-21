@@ -217,6 +217,15 @@ class Ledger:
                 exposure_pct=exposure_pct, position_pct_by_symbol=pct_by_symbol,
             )
 
+    def restore(self, positions: Mapping[str, Position], cash: Decimal) -> None:
+        """Setzt Kasse und Positionen aus einer externen Quelle (dem Journal,
+        A-14) statt sie ueber apply() zu erarbeiten — fuer den Start eines
+        neuen Prozesses. last_marks bleibt bewusst leer: E-010/Weg A macht
+        das fuer resolve_pending() ueberfluessig; ein POST /api/risk/check
+        liefert vor dem naechsten mark()-Aufruf ohnehin frische Kurse."""
+        self._positions = dict(positions)
+        self._cash = cash
+
     def to_portfolio_state(self, v: Valuation, start_of_day_equity: Decimal) -> risk.PortfolioState:
         """Baut den PortfolioState fuer die Risiko-Engine."""
         return risk.PortfolioState(
