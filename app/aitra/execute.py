@@ -57,19 +57,29 @@ def _journal_fill(ctx: ExecutionContext, decision_id: int, fill: Fill) -> None:
     gemessen 11.292 von 116.421 eines Jahreslaufs) — das war nicht nur teuer,
     sondern liess auch ein Fenster offen, in dem genau dieser halbe Zustand
     auf der Platte stand.
+
+    Scheitert einer der drei Schreibvorgaenge, wird die Transaktion
+    zurueckgerollt (nicht nur die Exception durchgereicht): sonst bliebe die
+    Verbindung mit bereits geschriebenen, aber uncommitteten Zeilen offen, und
+    ein spaeterer, voellig unverwandter commit() an derselben Verbindung
+    wuerde den halb gebuchten Fill doch noch persistieren.
     """
-    fill_id = store.insert_fill(
-        ctx.conn, run_id=ctx.run_id, decision_id=decision_id, symbol=fill.symbol, side=fill.side,
-        candle_open_time=fill.candle_open_time, price=fill.price, qty=fill.qty,
-        gross_quote=fill.gross_quote, fee=fill.fee, net_quote=fill.net_quote,
-        cash_after=fill.cash_after, fee_bps=fill.fee_bps, slippage_bps=fill.slippage_bps,
-        ts=db.now(), commit=False,
-    )
-    store.resolve_decision(ctx.conn, decision_id, fill_id, commit=False)
-    pos = ctx.ledger.position(fill.symbol)
-    store.upsert_position(ctx.conn, run_id=ctx.run_id, symbol=fill.symbol, qty=pos.qty,
-                           avg_price=pos.avg_price, realized_pnl=pos.realized_pnl,
-                           updated_at=db.now(), commit=False)
+    try:
+        fill_id = store.insert_fill(
+            ctx.conn, run_id=ctx.run_id, decision_id=decision_id, symbol=fill.symbol,
+            side=fill.side, candle_open_time=fill.candle_open_time, price=fill.price,
+            qty=fill.qty, gross_quote=fill.gross_quote, fee=fill.fee, net_quote=fill.net_quote,
+            cash_after=fill.cash_after, fee_bps=fill.fee_bps, slippage_bps=fill.slippage_bps,
+            ts=db.now(), commit=False,
+        )
+        store.resolve_decision(ctx.conn, decision_id, fill_id, commit=False)
+        pos = ctx.ledger.position(fill.symbol)
+        store.upsert_position(ctx.conn, run_id=ctx.run_id, symbol=fill.symbol, qty=pos.qty,
+                               avg_price=pos.avg_price, realized_pnl=pos.realized_pnl,
+                               updated_at=db.now(), commit=False)
+    except BaseException:
+        ctx.conn.rollback()
+        raise
     ctx.conn.commit()
 
 

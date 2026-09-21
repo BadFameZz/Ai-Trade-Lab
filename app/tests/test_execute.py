@@ -548,3 +548,34 @@ def test_resolve_pending_ablehnung_ist_kein_verfall(tmp_path):
     assert row["approved"] == 0
     assert row["pending_since_ms"] is None
     assert ctx.conn.execute("SELECT COUNT(*) c FROM fills").fetchone()["c"] == 0
+
+
+def test_journal_fill_rollt_bei_fehler_auf_dem_dritten_schreibvorgang_zurueck(tmp_path):
+    """_journal_fill() schreibt Fill, Entscheidungsverknuepfung und
+    Positionsschnappschuss mit commit=False und committet erst am Ende (EINE
+    Transaktion). Scheitert der dritte Schreibvorgang, muss die Transaktion
+    zurueckgerollt werden -- sonst haengt ein halb gebuchter Fill (Fill-Zeile
+    und resolve_decision bereits geschrieben, nur nicht committet) in der
+    offenen Transaktion, bis irgendein spaeterer, voellig unverwandter
+    commit() ihn doch noch auf die Platte schreibt."""
+    ctx = _ctx(tmp_path)
+    kerze = _candle(1_800_000)
+    with patch("aitra.execute.store.upsert_position", side_effect=RuntimeError("defekt")):
+        with pytest.raises(RuntimeError, match="defekt"):
+            execute_proposal(
+                Proposal("BTCUSDC", "BUY", 5), ctx, marks={}, ts_ms=900_000,
+                ref_price=Decimal("81287.03"), start_of_day_equity=Decimal("10000"),
+                next_candle=kerze,
+            )
+
+    # Die Transaktion darf nicht offen haengen bleiben.
+    assert not ctx.conn.in_transaction, "Transaktion nach Fehler noch offen"
+
+    # Ein voellig unverwandter, spaeterer Commit darf den halb gebuchten Fill
+    # nicht doch noch persistieren.
+    ctx.conn.execute("UPDATE runs SET finished_at = ? WHERE run_id = ?", ("x", ctx.run_id))
+    ctx.conn.commit()
+
+    assert ctx.conn.execute("SELECT COUNT(*) c FROM fills").fetchone()["c"] == 0
+    row = ctx.conn.execute("SELECT fill_id FROM decisions WHERE run_id = ?", (ctx.run_id,)).fetchone()
+    assert row["fill_id"] is None, "Entscheidung wurde trotz Rollback mit fill_id verknuepft"
