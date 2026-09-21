@@ -253,6 +253,23 @@ def resolve_decision(conn: sqlite3.Connection, decision_id: int, fill_id: int) -
     conn.commit()
 
 
+def reject_decision(conn: sqlite3.Connection, decision_id: int, code: str, reason: str) -> None:
+    """Etikettiert eine bereits protokollierte Entscheidung nachtraeglich als abgelehnt.
+
+    Gegenstueck zu expire_decision(): dort verfaellt ein Vorschlag mangels
+    Folgekerze, hier scheitert er an einer Pruefung nach der Risk Engine
+    (Groessenbemessung oder Ledger). Ohne diesen Aufruf bliebe die Zeile auf
+    approved = 1 / risk_code = 'OK' stehen, obwohl nie ein Fill entstand -- das
+    Journal wuerde eine Ablehnung als Genehmigung ausweisen (A-6).
+    """
+    conn.execute(
+        "UPDATE decisions SET approved = 0, risk_code = ?, risk_reason = ?, "
+        "pending_since_ms = NULL, pending_ref_price = NULL WHERE id = ?",
+        (code, reason, decision_id),
+    )
+    conn.commit()
+
+
 def expire_decision(conn: sqlite3.Connection, decision_id: int) -> None:
     conn.execute(
         "UPDATE decisions SET pending_since_ms = NULL, pending_ref_price = NULL, "

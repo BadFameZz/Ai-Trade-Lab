@@ -102,12 +102,14 @@ def execute_proposal(
 
     spec = ctx.specs.get(proposal.symbol)
     if spec is None:
-        return ExecutionResult(decision_id, False, "NO_SPEC", f"Keine SymbolSpec für {proposal.symbol}",
-                                status="rejected")
+        grund = f"Keine SymbolSpec für {proposal.symbol}"
+        store.reject_decision(ctx.conn, decision_id, "NO_SPEC", grund)
+        return ExecutionResult(decision_id, False, "NO_SPEC", grund, status="rejected")
 
     held = ctx.ledger.position(proposal.symbol).qty
     order = size_order(proposal, valuation, spec, ref_price, ctx.fee_bps, ctx.slippage_bps, held)
     if isinstance(order, Rejection):
+        store.reject_decision(ctx.conn, decision_id, order.code, order.reason)
         return ExecutionResult(decision_id, False, order.code, order.reason, status="rejected")
 
     if next_candle is None:
@@ -117,6 +119,7 @@ def execute_proposal(
 
     fill = ctx.ledger.apply(order, next_candle)
     if isinstance(fill, Rejection):
+        store.reject_decision(ctx.conn, decision_id, fill.code, fill.reason)
         return ExecutionResult(decision_id, False, fill.code, fill.reason, status="rejected")
 
     _journal_fill(ctx, decision_id, fill)
@@ -140,14 +143,18 @@ def resolve_pending(ctx: ExecutionContext, candle: Candle) -> list[Fill]:
             continue
         spec = ctx.specs.get(row["symbol"])
         if spec is None:
-            store.expire_decision(ctx.conn, row["id"])
+            store.reject_decision(ctx.conn, row["id"], "NO_SPEC",
+                                   f"Keine SymbolSpec für {row['symbol']}")
             continue
         roh_ref = row["pending_ref_price"]
         if roh_ref is None:
             # Zeile aus einer DB vor Migration 3: der Vorschlagspreis fehlt.
             # Verwerfen ist richtig — mit candle.open weiterzurechnen waere
-            # genau der Look-ahead, den Migration 3 beseitigt.
-            store.expire_decision(ctx.conn, row["id"])
+            # genau der Look-ahead, den Migration 3 beseitigt. Eigener Code,
+            # nicht PENDING_EXPIRED: der Vorschlag ist nicht verfallen,
+            # sondern nicht mehr bemessbar.
+            store.reject_decision(ctx.conn, row["id"], "NO_REF_PRICE",
+                                   "Kein gespeicherter Vorschlagspreis (DB vor Migration 3)")
             continue
         ref_price = money.from_text(roh_ref)
         held = ctx.ledger.position(row["symbol"]).qty
@@ -162,11 +169,14 @@ def resolve_pending(ctx: ExecutionContext, candle: Candle) -> list[Fill]:
         valuation = ctx.ledger.mark(marks, ts_ms=ctx.clock.now_ms())
         order = size_order(proposal, valuation, spec, ref_price, ctx.fee_bps, ctx.slippage_bps, held)
         if isinstance(order, Rejection):
-            store.expire_decision(ctx.conn, row["id"])
+            # Frueher PENDING_EXPIRED: ein INSUFFICIENT_CASH wurde als
+            # "verfallen" etikettiert und die Ursache war aus dem Journal
+            # nicht mehr lesbar.
+            store.reject_decision(ctx.conn, row["id"], order.code, order.reason)
             continue
         fill = ctx.ledger.apply(order, candle)
         if isinstance(fill, Rejection):
-            store.expire_decision(ctx.conn, row["id"])
+            store.reject_decision(ctx.conn, row["id"], fill.code, fill.reason)
             continue
         _journal_fill(ctx, row["id"], fill)
         filled.append(fill)

@@ -235,7 +235,7 @@ def test_a7b_verfall_an_der_grenze_1799_vs_1801_sekunden(tmp_path):
     assert expired == [pending.decision_id]
     row = ctx.conn.execute("SELECT risk_code, pending_since_ms FROM decisions WHERE id=?",
                             (pending.decision_id,)).fetchone()
-    assert row["risk_code"] == "PENDING_EXPIRED"
+    assert row["risk_code"] == "PENDING_EXPIRED"  # echter Verfall, kein Scheitern
     assert row["pending_since_ms"] is None
     assert ctx.conn.execute("SELECT COUNT(*) c FROM fills").fetchone()["c"] == 0
 
@@ -365,9 +365,12 @@ def test_resolve_pending_verwirft_zeilen_ohne_gespeicherten_ref_price(tmp_path):
 
     assert resolve_pending(ctx, _candle(1_800_000)) == []
     assert ctx.conn.execute("SELECT COUNT(*) c FROM fills").fetchone()["c"] == 0
-    row = ctx.conn.execute("SELECT risk_code, pending_since_ms FROM decisions WHERE id=?",
+    row = ctx.conn.execute("SELECT approved, risk_code, pending_since_ms FROM decisions WHERE id=?",
                             (pending.decision_id,)).fetchone()
-    assert row["risk_code"] == "PENDING_EXPIRED"
+    # Eigener Code, nicht PENDING_EXPIRED: der Vorschlag ist nicht verfallen,
+    # sondern nicht mehr bemessbar (Review-Befund 6).
+    assert row["risk_code"] == "NO_REF_PRICE"
+    assert row["approved"] == 0
     assert row["pending_since_ms"] is None
 
 
@@ -468,3 +471,80 @@ def test_resolve_pending_bewertet_auch_das_andere_symbol(tmp_path):
     erwartet = v.cash + eth_menge * eth_preis + ctx.ledger.position("BTCUSDC").qty * Decimal("81287.03")
     assert v.equity - erwartet == Decimal("0")
     assert v.equity > Decimal("9000")  # kein Scheinverlust in der Groessenordnung der ETH-Position
+
+
+def test_a6_ablehnungen_stehen_nicht_als_genehmigt_im_journal(tmp_path):
+    """Fix-Welle, Review-Befund 6: Bei einer Ablehnung aus size_order() oder
+    Ledger.apply() blieb die Journalzeile auf approved = 1 / risk_code = 'OK'
+    stehen, obwohl nie ein Fill entstand. Das Journal wies eine Ablehnung als
+    Genehmigung aus -- und A-6 ("abgelehnte Vorschlaege erzeugen null Fills")
+    war aus der Datenbank allein nicht mehr nachpruefbar.
+
+    Gemessen werden beide Zweige von execute_proposal():
+    - size_order() lehnt ab: 0,01 % von 10.000 USDC = 1 USDC liegt unter
+      min_notional (5 USDC) -> MIN_NOTIONAL, bevor der Ledger ueberhaupt
+      gefragt wird.
+    - Ledger.apply() lehnt ab: dieselbe Order, aber mit einer Folgekerze, deren
+      Preis so weit springt, dass die Kasse nicht mehr reicht.
+    """
+    ctx = _ctx(tmp_path)
+
+    zu_klein = execute_proposal(
+        Proposal("BTCUSDC", "BUY", 0.01), ctx, marks={}, ts_ms=900_000,
+        ref_price=Decimal("81287.03"), start_of_day_equity=Decimal("10000"),
+        next_candle=_candle(1_800_000),
+    )
+    assert zu_klein.status == "rejected"
+    assert zu_klein.code == "MIN_NOTIONAL"
+    row = ctx.conn.execute("SELECT approved, risk_code, risk_reason FROM decisions WHERE id=?",
+                            (zu_klein.decision_id,)).fetchone()
+    assert row["approved"] == 0
+    assert row["risk_code"] == "MIN_NOTIONAL"
+    assert "min_notional" in row["risk_reason"]
+    assert ctx.conn.execute("SELECT COUNT(*) c FROM fills").fetchone()["c"] == 0
+
+
+def test_a6_ledger_ablehnung_wird_im_journal_etikettiert(tmp_path):
+    """Zweiter Zweig: die Groessenbemessung geht durch, der Ledger lehnt ab.
+    Die Folgekerze eroeffnet weit ueber dem Referenzpreis, mit dem bemessen
+    wurde -- die Kasse reicht dann nicht mehr (INSUFFICIENT_CASH)."""
+    ctx = _ctx(tmp_path)
+    ctx.engine = RiskEngine(Config(Decimal("10000"), 100, 100, 100, tmp_path, "x" * 32))
+    teure_kerze = _candle(1_800_000, "200000.00")
+    r = execute_proposal(
+        Proposal("BTCUSDC", "BUY", 100), ctx, marks={}, ts_ms=900_000,
+        ref_price=Decimal("81287.03"), start_of_day_equity=Decimal("10000"),
+        next_candle=teure_kerze,
+    )
+    assert r.status == "rejected"
+    assert r.code == "INSUFFICIENT_CASH"
+    row = ctx.conn.execute("SELECT approved, risk_code FROM decisions WHERE id=?",
+                            (r.decision_id,)).fetchone()
+    assert row["approved"] == 0
+    assert row["risk_code"] == "INSUFFICIENT_CASH"
+    assert ctx.conn.execute("SELECT COUNT(*) c FROM fills").fetchone()["c"] == 0
+
+
+def test_resolve_pending_ablehnung_ist_kein_verfall(tmp_path):
+    """resolve_pending() etikettierte alle Fehlerzweige als PENDING_EXPIRED --
+    ein INSUFFICIENT_CASH wurde damit zu "verfallen", und die Ursache war aus
+    dem Journal nicht mehr lesbar (Review-Befund 6)."""
+    ctx = _ctx(tmp_path)
+    ctx.engine = RiskEngine(Config(Decimal("10000"), 100, 100, 100, tmp_path, "x" * 32))
+    pending = execute_proposal(
+        Proposal("BTCUSDC", "BUY", 100), ctx, marks={}, ts_ms=900_000,
+        ref_price=Decimal("81287.03"), start_of_day_equity=Decimal("10000"), next_candle=None,
+    )
+    assert pending.status == "pending_fill"
+
+    # Die Folgekerze eroeffnet weit oben: bemessen wurde mit 81.287,03, gefuellt
+    # werden soll zu 200.000 -> die Kasse reicht nicht.
+    assert resolve_pending(ctx, _candle(1_800_000, "200000.00")) == []
+    row = ctx.conn.execute(
+        "SELECT approved, risk_code, pending_since_ms FROM decisions WHERE id=?",
+        (pending.decision_id,),
+    ).fetchone()
+    assert row["risk_code"] == "INSUFFICIENT_CASH"  # nicht PENDING_EXPIRED
+    assert row["approved"] == 0
+    assert row["pending_since_ms"] is None
+    assert ctx.conn.execute("SELECT COUNT(*) c FROM fills").fetchone()["c"] == 0
