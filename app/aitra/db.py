@@ -33,6 +33,80 @@ MIGRATIONS: list[str] = [
     CREATE INDEX idx_events_ts ON events(ts);
     CREATE TABLE state (key TEXT PRIMARY KEY, value TEXT NOT NULL);
     """,
+    # 2 – Marktdaten, Ledger, Benchmark
+    """
+    CREATE TABLE candles (
+        symbol     TEXT    NOT NULL,
+        interval   TEXT    NOT NULL,
+        open_time  INTEGER NOT NULL,          -- ms UTC
+        close_time INTEGER NOT NULL,
+        open TEXT NOT NULL, high TEXT NOT NULL, low TEXT NOT NULL, close TEXT NOT NULL,
+        volume TEXT NOT NULL,
+        source     TEXT    NOT NULL,          -- 'binance' | 'backfill' | 'fixture'
+        fetched_at TEXT    NOT NULL,
+        PRIMARY KEY (symbol, interval, open_time)
+    ) WITHOUT ROWID;
+    CREATE INDEX idx_candles_time ON candles(symbol, interval, close_time);
+
+    CREATE TABLE runs (
+        run_id      TEXT PRIMARY KEY,         -- 'live' | 'replay-<utc>' | 'bench-<run_id>'
+        kind        TEXT NOT NULL,            -- live | replay | benchmark
+        started_at  TEXT NOT NULL,
+        finished_at TEXT,
+        code_version TEXT NOT NULL,
+        params_json TEXT NOT NULL DEFAULT '{}' -- Symbole, Intervall, Gebühr, Slippage,
+                                               -- Startkapital, Herkunft der SymbolSpecs
+    );
+
+    CREATE TABLE symbol_specs (
+        symbol TEXT PRIMARY KEY,
+        base TEXT NOT NULL, quote TEXT NOT NULL,
+        tick_size TEXT NOT NULL, step_size TEXT NOT NULL,
+        min_qty TEXT NOT NULL, min_notional TEXT NOT NULL,
+        base_precision INTEGER NOT NULL, quote_precision INTEGER NOT NULL,
+        source TEXT NOT NULL,                 -- 'builtin' | 'binance'
+        fetched_at TEXT NOT NULL
+    );
+
+    CREATE TABLE fills (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        ts TEXT NOT NULL,
+        run_id TEXT NOT NULL REFERENCES runs(run_id),
+        decision_id INTEGER REFERENCES decisions(id),
+        symbol TEXT NOT NULL,
+        side TEXT NOT NULL,                   -- BUY | SELL
+        candle_open_time INTEGER NOT NULL,
+        price TEXT NOT NULL, qty TEXT NOT NULL,
+        gross_quote TEXT NOT NULL, fee TEXT NOT NULL, net_quote TEXT NOT NULL,
+        cash_after TEXT NOT NULL,
+        fee_bps REAL NOT NULL, slippage_bps REAL NOT NULL
+    );
+    CREATE INDEX idx_fills_run ON fills(run_id, id);
+
+    CREATE TABLE positions (
+        run_id TEXT NOT NULL REFERENCES runs(run_id),
+        symbol TEXT NOT NULL,
+        qty TEXT NOT NULL,
+        avg_price TEXT NOT NULL,
+        realized_pnl TEXT NOT NULL DEFAULT '0',
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY (run_id, symbol)
+    );
+
+    CREATE TABLE equity_curve (
+        run_id TEXT NOT NULL REFERENCES runs(run_id),
+        ts_ms INTEGER NOT NULL,
+        equity TEXT NOT NULL,
+        cash TEXT NOT NULL,
+        benchmark_equity TEXT,
+        exposure_pct REAL NOT NULL,
+        PRIMARY KEY (run_id, ts_ms)
+    ) WITHOUT ROWID;
+
+    ALTER TABLE decisions ADD COLUMN run_id TEXT;
+    ALTER TABLE decisions ADD COLUMN fill_id INTEGER;
+    ALTER TABLE decisions ADD COLUMN pending_since_ms INTEGER;  -- schwebende Vorschläge, E-006
+    """,
 ]
 
 
