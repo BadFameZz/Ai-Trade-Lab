@@ -1,13 +1,14 @@
 # app/tests/test_ledger.py
 from __future__ import annotations
 
+import decimal
 import re
 from decimal import Decimal
 from pathlib import Path
 
 import pytest
 
-from aitra import money
+from aitra import ledger, money
 from aitra.ledger import Fill, Ledger, Order, Rejection, Valuation
 from aitra.marketdata import Candle
 
@@ -293,3 +294,120 @@ def test_last_marks_merkt_sich_fill_und_mark_preise():
     assert ledger.last_marks["BTCUSDC"] == Decimal("82000")
     ledger.last_marks["BTCUSDC"] = Decimal("1")  # Kopie, kein Durchgriff
     assert ledger.last_marks["BTCUSDC"] == Decimal("82000")
+
+
+def test_realized_pnl_per_sell_repliziert_die_buchhaltung():
+    """Zwei Kaeufe zu unterschiedlichen Preisen (mengengewichteter Schnitt),
+    dann ein Teilverkauf mit Gewinn und einer mit Verlust — von Hand
+    nachgerechnet, nicht aus dem Lauf uebernommen.
+
+    Kauf 1: 10 @ 100 -> avg=100. Kauf 2: 10 @ 120 -> avg=(10*100+10*120)/20=110.
+    Verkauf 1: 5 @ 130 -> realized=(130-110)*5=100 (Gewinn).
+    Verkauf 2: 5 @ 90  -> realized=(90-110)*5=-100 (Verlust).
+    """
+    fills = [
+        {"symbol": "BTCUSDC", "side": "BUY", "qty": Decimal("10"), "price": Decimal("100"), "id": 1},
+        {"symbol": "BTCUSDC", "side": "BUY", "qty": Decimal("10"), "price": Decimal("120"), "id": 2},
+        {"symbol": "BTCUSDC", "side": "SELL", "qty": Decimal("5"), "price": Decimal("130"), "id": 3},
+        {"symbol": "BTCUSDC", "side": "SELL", "qty": Decimal("5"), "price": Decimal("90"), "id": 4},
+    ]
+    ergebnis = ledger.realized_pnl_per_sell(fills)
+    assert ergebnis == [Decimal("100"), Decimal("-100")]
+
+
+def test_realized_pnl_per_sell_haelt_symbole_getrennt():
+    """Pruefflaeche: zwei Symbole duerfen sich nicht gegenseitig beeinflussen -
+    ein Bug, der alle Fills in EINEN Topf wirft, waere sonst unbemerkt gruen,
+    solange nur ein Symbol im ersten Test vorkommt."""
+    fills = [
+        {"symbol": "BTCUSDC", "side": "BUY", "qty": Decimal("1"), "price": Decimal("100"), "id": 1},
+        {"symbol": "BNBUSDC", "side": "BUY", "qty": Decimal("1"), "price": Decimal("500"), "id": 2},
+        {"symbol": "BTCUSDC", "side": "SELL", "qty": Decimal("1"), "price": Decimal("110"), "id": 3},
+        {"symbol": "BNBUSDC", "side": "SELL", "qty": Decimal("1"), "price": Decimal("490"), "id": 4},
+    ]
+    ergebnis = ledger.realized_pnl_per_sell(fills)
+    assert len(ergebnis) == 2, f"Pruefflaeche: 2 SELL-Fills erwartet, gemessen {len(ergebnis)}"
+    assert Decimal("10") in ergebnis and Decimal("-10") in ergebnis
+
+
+def test_realized_pnl_per_sell_stimmt_mit_dem_echten_ledger_ueberein():
+    """Bindende Zusatzauflage (nicht im Brief): realized_pnl_per_sell() dupliziert
+    dieselbe Geldrechnung wie Ledger._book_buy()/_book_sell(). Ohne diesen Test
+    koennte jemand _book_sell() aendern, ohne dass die Trefferquote im Dashboard
+    (web.py) das je bemerkt — sie wuerde still falsch, waehrend die beiden
+    handgerechneten Tests oben weiterhin gruen blieben.
+
+    Mindestens 200 gemischte Kauf-/Verkaufsfills ueber BEIDE Symbole laufen durch
+    einen ECHTEN Ledger; dieselbe chronologische Folge - mit den tatsaechlich
+    AUSGEFUEHRTEN price/qty-Werten aus den zurueckgegebenen Fill-Objekten, nicht
+    den angeforderten - geht durch realized_pnl_per_sell(). Je Symbol muss die
+    Summe der Einzelgewinne EXAKT (kein round(), Decimal-Gleichheit) auf
+    ledger.position(symbol).realized_pnl treffen.
+
+    Die Pruefflaeche wird gezaehlt und zugesichert (Lehre aus Teilprojekt A1,
+    wo eine Pruefflaeche unbemerkt von 10.000 auf 3.513 schrumpfte, weil dem
+    Ledger das Geld ausging): zu wenige angekommene SELL-Fills lassen den Test
+    scheitern, statt still weniger zu pruefen.
+    """
+    l = _ledger(cash="1000000")
+    fills_fuer_replik: list[dict] = []
+    ts = 900_000
+    for i in range(1000):
+        symbol = "BTCUSDC" if i % 2 == 0 else "BNBUSDC"
+        spec = SPECS[symbol]
+        base_price = Decimal("81287.03") if symbol == "BTCUSDC" else Decimal("2631.77")
+        price = base_price + Decimal(i % 50) * spec.tick_size
+        pos = l.position(symbol)
+        side = "BUY" if (i % 3) != 2 else "SELL"
+        if side == "SELL" and pos.qty == 0:
+            side = "BUY"
+        equity_now = l.mark({"BTCUSDC": price, "BNBUSDC": price}, ts_ms=ts).equity
+        target_quote = equity_now * Decimal("2") / Decimal(100)
+        if side == "BUY":
+            # Gedeckelt auf die verfuegbare Kasse (wie test_buchhaltung_identitaet_a1),
+            # sonst laeuft sie bei ueberwiegend BUY-lastigen Sequenzen leer.
+            cash_cap = l.cash * Decimal("0.95")
+            raw_qty = min(target_quote, cash_cap) / price
+        else:
+            raw_qty = min(target_quote / price, pos.qty)
+        qty = money.step_down(raw_qty, spec.step_size)
+        candle = Candle(symbol=symbol, interval="15m", open_time=ts, close_time=ts + 899_999,
+                         open=price, high=price, low=price, close=price, volume=Decimal("1"), closed=True)
+        result = l.apply(Order(symbol, side, qty), candle)
+        ts += 900_000
+        if isinstance(result, Rejection):
+            continue
+        fills_fuer_replik.append({
+            "id": len(fills_fuer_replik) + 1, "symbol": result.symbol, "side": result.side,
+            "qty": result.qty, "price": result.price,
+        })
+
+    sell_rows = [f for f in fills_fuer_replik if f["side"] == "SELL"]
+    assert len(fills_fuer_replik) >= 200, (
+        f"Pruefflaeche zu klein: {len(fills_fuer_replik)} Fills statt mindestens 200"
+    )
+    assert len(sell_rows) >= 50, (
+        f"Pruefflaeche zu klein: nur {len(sell_rows)} SELL-Fills kamen an - "
+        "der Kopplungstest wuerde damit kaum etwas pruefen"
+    )
+
+    pnls = ledger.realized_pnl_per_sell(fills_fuer_replik)
+    assert len(pnls) == len(sell_rows), (
+        f"Pruefflaeche: {len(pnls)} berechnete PnL-Werte statt {len(sell_rows)} SELL-Fills"
+    )
+
+    # Unter money.CTX summieren wie der Ledger selbst (apply() rechnet
+    # ausschliesslich in diesem Kontext, prec=34) - sonst driftet allein die
+    # Summierung hier im Test vom Standardkontext (prec=28) weg, obwohl
+    # realized_pnl_per_sell() bereits korrekt unter money.CTX rechnet.
+    with decimal.localcontext(money.CTX):
+        je_symbol: dict[str, Decimal] = {"BTCUSDC": Decimal(0), "BNBUSDC": Decimal(0)}
+        for row, pnl in zip(sell_rows, pnls):
+            je_symbol[row["symbol"]] += pnl
+
+    for symbol in ("BTCUSDC", "BNBUSDC"):
+        echte_summe = l.position(symbol).realized_pnl
+        assert je_symbol[symbol] == echte_summe, (
+            f"{symbol}: realized_pnl_per_sell()-Summe {je_symbol[symbol]} != "
+            f"Ledger.position({symbol}).realized_pnl {echte_summe}"
+        )

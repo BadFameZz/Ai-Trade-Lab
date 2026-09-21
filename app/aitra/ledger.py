@@ -9,7 +9,7 @@ from __future__ import annotations
 import decimal
 from dataclasses import dataclass
 from decimal import ROUND_UP, Decimal
-from typing import Mapping
+from typing import Mapping, Sequence
 
 from . import money, risk
 from .marketdata import Candle
@@ -234,3 +234,39 @@ class Ledger:
             exposure_pct=v.exposure_pct,
             position_pct_by_symbol=v.position_pct_by_symbol,
         )
+
+
+def realized_pnl_per_sell(fills: Sequence[Mapping]) -> list[Decimal]:
+    """Repliziert die mengengewichtete Durchschnittspreis-Buchhaltung aus
+    Ledger._book_buy()/_book_sell() ueber eine bereits gespeicherte Fill-Liste,
+    chronologisch je Symbol, und liefert je SELL-Fill den realisierten Gewinn
+    oder Verlust. Fuer web.py's Trefferquote (Spec 7.1) — kein neuer
+    Datenbank-Zustand, da fills.realized_pnl je Fill nicht gespeichert wird
+    (nur kumulativ in positions.realized_pnl).
+
+    Laeuft bewusst unter money.CTX (prec=34), genau wie _book_buy()/_book_sell()
+    (siehe apply()). Ohne das driftet das Ergebnis bei langen Ketten mengen-
+    gewichteter Divisionen vom Standardkontext (prec=28) langsam vom echten
+    Ledger weg -- gemessen im Kopplungstest
+    test_realized_pnl_per_sell_stimmt_mit_dem_echten_ledger_ueberein: nach 1000
+    Fills unterschied sich die neunzehnte Nachkommastelle. Die Funktion hiesse
+    dann exakt wie die Spec es verlangt, waere es aber nicht.
+    """
+    with decimal.localcontext(money.CTX):
+        avg_price: dict[str, Decimal] = {}
+        qty: dict[str, Decimal] = {}
+        ergebnis: list[Decimal] = []
+        for f in sorted(fills, key=lambda f: f["id"]):
+            sym = f["symbol"]
+            if f["side"] == "BUY":
+                alte_qty = qty.get(sym, Decimal(0))
+                neue_qty = alte_qty + f["qty"]
+                alter_avg = avg_price.get(sym, Decimal(0))
+                avg_price[sym] = ((alte_qty * alter_avg + f["qty"] * f["price"]) / neue_qty
+                                   if neue_qty > 0 else Decimal(0))
+                qty[sym] = neue_qty
+            else:
+                realized = (f["price"] - avg_price.get(sym, Decimal(0))) * f["qty"]
+                ergebnis.append(realized)
+                qty[sym] = qty.get(sym, Decimal(0)) - f["qty"]
+        return ergebnis
