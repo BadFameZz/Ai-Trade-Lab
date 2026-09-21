@@ -119,14 +119,20 @@ button:disabled{opacity:.45;cursor:not-allowed}
       <div class="card kpi"><div class="v" id="k-eq">–</div><div class="l">Portfolio (USDC)</div></div>
       <div class="card kpi"><div class="v" id="k-day">–</div><div class="l">Heute P/L</div></div>
       <div class="card kpi"><div class="v" id="k-trades">0</div><div class="l">Trades gesamt</div></div>
-      <div class="card kpi"><div class="v muted">—</div><div class="l">Trefferquote</div></div>
-      <div class="card kpi"><div class="v muted">—</div><div class="l">Max Drawdown</div></div>
+      <div class="card kpi"><div class="v" id="k-hitrate">—</div><div class="l">Trefferquote</div></div>
+      <div class="card kpi"><div class="v" id="k-drawdown">—</div><div class="l">Max Drawdown</div></div>
     </section>
 
     <section class="grid row2">
       <div class="card">
         <h3>Portfolio-Verlauf <span class="muted">vs. BTC Buy &amp; Hold</span></h3>
-        <div class="chart-empty">Noch keine Daten.<br>Der Chart erscheint, sobald Marktdaten und Paper-Ledger laufen (Phase 2 + 3).</div>
+        <!--
+          L-1 (Spec Abschnitt 12): kein automatisierter Test zeichnet dieses
+          SVG nach. Geprueft wird nur, dass die richtigen Endpunkte gerufen
+          und genau zwei Polylinien erzeugt werden - kein Pixel.
+        -->
+        <svg id="chart" viewBox="0 0 600 220" preserveAspectRatio="none" style="width:100%;height:220px"></svg>
+        <div class="chart-empty" id="chart-empty" style="display:none">Noch keine Kursdaten.<br>Der Chart erscheint, sobald der Livebetrieb läuft.</div>
       </div>
       <div class="card">
         <h3>Risk Engine <span id="ks-state">–</span></h3>
@@ -151,7 +157,7 @@ button:disabled{opacity:.45;cursor:not-allowed}
       </div>
       <div class="card">
         <h3>Offene Positionen</h3>
-        <div class="muted" style="font-size:14px">Keine offenen Positionen.</div>
+        <div id="positions" class="kv"></div>
       </div>
       <div class="card">
         <h3>Marktregime</h3>
@@ -167,6 +173,11 @@ button:disabled{opacity:.45;cursor:not-allowed}
           <tbody id="dj"></tbody>
         </table>
       </div>
+    </section>
+
+    <section class="card" style="margin-top:16px">
+      <h3>Schwebende Vorschläge <span class="muted" id="pending-count"></span></h3>
+      <div id="pending" class="kv"><div class="muted" style="font-size:14px">Keine schwebenden Vorschläge.</div></div>
     </section>
 
     <section class="card" style="margin-top:16px" id="protokolle">
@@ -188,6 +199,28 @@ function cell(tr, t, cls) { const td = document.createElement('td'); if (cls) td
 
 async function j(url, opts) { const r = await fetch(url, opts); return { ok: r.ok, status: r.status, body: await r.json().catch(() => ({})) }; }
 
+// Die zwei Kurslinien entstehen als echte SVG-Elemente per createElementNS,
+// nicht als statisches Markup - so haengen #poly-portfolio/#poly-benchmark
+// wirklich am JS, das sie fuellt, statt als toter Platzhalter im HTML zu liegen.
+(function initChart() {
+  const svg = $('chart');
+  const benchmark = document.createElementNS('http://www.w3.org/2000/svg', 'polyline');
+  benchmark.id = 'poly-benchmark';
+  benchmark.setAttribute('fill', 'none');
+  benchmark.setAttribute('stroke', 'rgba(235,238,245,.35)');
+  benchmark.setAttribute('stroke-width', '2');
+  benchmark.setAttribute('stroke-dasharray', '4 4');
+  benchmark.setAttribute('points', '');
+  svg.append(benchmark);
+  const portfolio = document.createElementNS('http://www.w3.org/2000/svg', 'polyline');
+  portfolio.id = 'poly-portfolio';
+  portfolio.setAttribute('fill', 'none');
+  portfolio.setAttribute('stroke', 'var(--blue)');
+  portfolio.setAttribute('stroke-width', '2.5');
+  portfolio.setAttribute('points', '');
+  svg.append(portfolio);
+})();
+
 async function loadStatus() {
   const { body: s } = await j('/api/status');
   text($('ver'), s.version); text($('cap'), fmt(s.starting_balance) + ' USDC');
@@ -202,6 +235,7 @@ async function loadStatus() {
   text($('ks-state'), s.kill_switch ? 'KILL SWITCH AKTIV' : 'NORMAL', s.kill_switch ? 'no' : 'ok');
   pill('p-risk', s.kill_switch ? 'Orders blockiert' : 'Risk normal', s.kill_switch ? 'r' : 'g');
   $('ks-on').disabled = s.kill_switch; $('ks-off').disabled = !s.kill_switch;
+  loadPositionsAndKpis(s);
 }
 
 async function loadHealth() {
@@ -246,9 +280,62 @@ async function loadEvents() {
   }
 }
 
+async function loadChart() {
+  const { body } = await j('/api/equity-curve?run_id=live&limit=500');
+  const pts = body.points || [];
+  const empty = $('chart-empty');
+  const svg = $('chart');
+  if (pts.length < 2) { empty.style.display = 'grid'; svg.style.display = 'none'; return; }
+  empty.style.display = 'none'; svg.style.display = 'block';
+  const eq = pts.map(p => Number(p.equity));
+  const bm = pts.map(p => p.benchmark != null ? Number(p.benchmark) : null);
+  const alle = eq.concat(bm.filter(v => v != null));
+  const min = Math.min(...alle), max = Math.max(...alle) || 1;
+  const zux = (i) => (i / (pts.length - 1)) * 600;
+  const zuy = (v) => 210 - ((v - min) / (max - min || 1)) * 200;
+  const zuPoints = (werte) => werte.map((v, i) => v == null ? null : `${zux(i)},${zuy(v)}`).filter(Boolean).join(' ');
+  $('poly-portfolio').setAttribute('points', zuPoints(eq));
+  $('poly-benchmark').setAttribute('points', zuPoints(bm));
+}
+
+function loadPositionsAndKpis(s) {
+  const box = $('positions'); box.replaceChildren();
+  if (!s.positions || s.positions.length === 0) {
+    const d = document.createElement('div'); d.className = 'muted'; d.style.fontSize = '14px';
+    d.textContent = 'Keine offenen Positionen.'; box.append(d);
+  } else {
+    for (const p of s.positions) {
+      const row = document.createElement('div');
+      const a = document.createElement('span'); a.textContent = p.symbol;
+      const b = document.createElement('b'); b.textContent = `${p.qty} @ ${fmt(p.avg_price)}`;
+      row.append(a, b); box.append(row);
+    }
+  }
+  text($('k-hitrate'), s.hit_rate_pct != null ? fmt(s.hit_rate_pct, 1) + ' %' : '—');
+  text($('k-drawdown'), s.max_drawdown_pct != null ? fmt(s.max_drawdown_pct, 2) + ' %' : '—');
+}
+
+async function loadPending() {
+  const { body: rows } = await j('/api/decisions?limit=100');
+  const schwebend = rows.filter(r => r.pending_since_ms != null);
+  text($('pending-count'), schwebend.length + ' Einträge');
+  const box = $('pending'); box.replaceChildren();
+  if (schwebend.length === 0) {
+    const d = document.createElement('div'); d.className = 'muted'; d.style.fontSize = '14px';
+    d.textContent = 'Keine schwebenden Vorschläge.'; box.append(d);
+    return;
+  }
+  for (const r of schwebend) {
+    const row = document.createElement('div');
+    const a = document.createElement('span'); a.textContent = `${r.symbol} ${r.action}`;
+    const b = document.createElement('b'); b.textContent = `schwebend seit ${r.pending_since_ms} ms`;
+    row.append(a, b); box.append(row);
+  }
+}
+
 async function refresh() {
   text($('clock'), new Date().toLocaleString('de-DE'));
-  await Promise.allSettled([loadStatus(), loadHealth(), loadDecisions(), loadEvents()]);
+  await Promise.allSettled([loadStatus(), loadHealth(), loadDecisions(), loadEvents(), loadChart(), loadPending()]);
 }
 
 $('ks-on').addEventListener('click', async () => {
