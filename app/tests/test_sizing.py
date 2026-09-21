@@ -258,6 +258,36 @@ def test_a5_losgroessenverlust_ist_beziffert():
     )
     assert max_rest_pct < Decimal("0.1"), f"Prozentualer Verlust {max_rest_pct}% > 0.1%"
 
+    # UNTERE SCHRANKE (Fix-Welle, Review-Befund 11).
+    # max_rest wurde bisher berechnet und nie geprueft. Mit der frueher
+    # entfernten magischen Obergrenze (0.8129) ist damals auch die Untergrenze
+    # der Spec verschwunden (A-5: max(rest) > 0.70). A-5 waere seither auch bei
+    # einem Losgroessenverlust von exakt null gruen gewesen -- das Kriterium
+    # heisst aber "der Verlust ist BEZIFFERT", nicht "der Verlust ist klein".
+    #
+    # Herleitung der Schranke aus dem Aufbau (keine Zahl aus dem Lauf):
+    # - fee_bps = slippage_bps = 0 -> exec_price == price (price ist bereits ein
+    #   Vielfaches von tick_size).
+    # - qty = step_down(1000 / price, step), also
+    #   rest = 1000 - qty * price = frac * step * price, wobei frac der
+    #   Nachkommaanteil von (1000 / price) / step ist, frac aus [0, 1).
+    # - Die 1.000 Preise laufen in 1-USDC-Schritten von 80.787 bis 81.786.
+    #   (1000/p)/step aendert sich dabei um
+    #   1000 * (1/80787 - 1/81786) / 0,00001 = 15,1 -- die Stichproben
+    #   ueberstreichen also gut 15 volle Step-Intervalle mit rund 66 Punkten je
+    #   Intervall. frac wird damit dicht und mehrfach voll durchlaufen; ein
+    #   maximales frac unterhalb von 0,5 ist nur moeglich, wenn die
+    #   Quantisierung nicht mehr abrundet.
+    # - Die Schranke nimmt deshalb die Haelfte des kleinstmoeglichen
+    #   step * price im Feld, also beim niedrigsten Preis 80.787:
+    #   step_size * 80787 / 2. Das ist bewusst konservativ (die Spec nennt
+    #   0,70; hergeleitet sind hier 0,4039) -- aber es ist hergeleitet.
+    untere_schranke = BTC.step_size * Decimal("80787") / 2
+    assert max_rest > untere_schranke, (
+        f"Losgroessenverlust nicht beziffert: max(rest)={max_rest} <= {untere_schranke}. "
+        f"A-5 verlangt einen messbaren Verlust, keinen verschwundenen."
+    )
+
 
 def test_a8b_keine_versteckte_uhr_kein_versteckter_zufall():
     text = Path(__file__).resolve().parent.parent.joinpath("aitra", "sizing.py").read_text()
