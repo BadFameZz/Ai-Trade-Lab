@@ -419,3 +419,52 @@ def test_a2_kasse_und_mengen_nichtnegativ_ueber_execute_proposal(tmp_path):
     # bewusst grob (halb so gross wie die Zahl der BUY-Versuche, 400 * 2/3 / 2),
     # damit sie eine leerlaufende Kette meldet, ohne an einer Messzahl zu kleben.
     assert fills >= 133, f"Pruefflaeche zu klein: nur {fills} von 400 Versuchen gefuellt"
+
+
+def test_resolve_pending_bewertet_auch_das_andere_symbol(tmp_path):
+    """Fix-Welle, Review-Befund 5: resolve_pending() markierte nur das Symbol
+    der eintreffenden Kerze. Bei zwei gehaltenen Positionen fiel die andere aus
+    der Equity -- ein Scheinverlust, der ueber to_portfolio_state() bis in die
+    Tagesverlustgrenze durchschlaegt. Hier wird eine grosse ETH-Position
+    gehalten, waehrend ein BTC-Vorschlag schwebt und eine BTC-Kerze eintrifft.
+    """
+    ctx = _ctx(tmp_path)
+    ctx.engine = RiskEngine(Config(Decimal("10000"), 100, 100, 100, tmp_path, "x" * 32))
+    eth_preis = Decimal("2631.77")
+    eth_kerze = Candle(symbol="ETHUSDC", interval="15m", open_time=900_000, close_time=1_799_999,
+                        open=eth_preis, high=eth_preis, low=eth_preis, close=eth_preis,
+                        volume=Decimal("1"), closed=True)
+    gekauft = execute_proposal(
+        Proposal("ETHUSDC", "BUY", 40), ctx, marks={}, ts_ms=900_000, ref_price=eth_preis,
+        start_of_day_equity=Decimal("10000"), next_candle=eth_kerze,
+    )
+    assert gekauft.status == "filled"
+    eth_menge = ctx.ledger.position("ETHUSDC").qty
+    assert eth_menge > Decimal("0")
+
+    schwebend = execute_proposal(
+        Proposal("BTCUSDC", "BUY", 5), ctx,
+        marks={"ETHUSDC": eth_preis}, ts_ms=1_800_000, ref_price=Decimal("81287.03"),
+        start_of_day_equity=Decimal("10000"), next_candle=None,
+    )
+    assert schwebend.status == "pending_fill"
+
+    fills = resolve_pending(ctx, _candle(2_700_000))
+    assert len(fills) == 1
+
+    # Der eigentliche Schaden ist die FALSCHE ORDERGROESSE: size_order() bemisst
+    # gegen valuation.equity. Faellt die ETH-Position aus der Bewertung, sinkt
+    # equity von rund 10.000 auf rund 6.000, und aus 5 % werden statt ~500 USDC
+    # nur noch ~300 USDC. Deshalb wird hier die Groesse geprueft, nicht nur die
+    # Tatsache eines Fills.
+    assert fills[0].gross_quote > Decimal("450"), (
+        f"Order zu klein ({fills[0].gross_quote} USDC): die ETH-Position ist aus "
+        f"der Bewertung gefallen (Scheinverlust)"
+    )
+
+    # Die Identitaet muss ueber beide Symbole aufgehen -- die ETH-Position ist
+    # nicht aus der Equity gefallen.
+    v = ctx.ledger.mark({"ETHUSDC": eth_preis, "BTCUSDC": Decimal("81287.03")}, ts_ms=2_700_000)
+    erwartet = v.cash + eth_menge * eth_preis + ctx.ledger.position("BTCUSDC").qty * Decimal("81287.03")
+    assert v.equity - erwartet == Decimal("0")
+    assert v.equity > Decimal("9000")  # kein Scheinverlust in der Groessenordnung der ETH-Position

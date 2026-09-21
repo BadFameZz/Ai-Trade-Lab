@@ -249,3 +249,47 @@ def test_to_portfolio_state_gibt_position_pct_by_symbol_weiter():
     pf = ledger.to_portfolio_state(v, start_of_day_equity=Decimal("10000"))
     assert pf.position_pct_by_symbol == v.position_pct_by_symbol
     assert pf.position_pct_by_symbol["BTCUSDC"] > 0
+
+
+def test_mark_wirft_bei_gehaltener_position_ohne_marktpreis():
+    """Fix-Welle, Review-Befund 5: mark() uebersprang Symbole ohne Mark
+    stillschweigend. Dann gilt equity = cash + Summe(qty * mark) nicht mehr --
+    die unbewertete Position faellt aus der Equity und erzeugt einen
+    Scheinverlust. Jetzt wirft mark() statt still falsch zu rechnen."""
+    ledger = _ledger()
+    ledger.apply(Order("BTCUSDC", "BUY", Decimal("0.01")), _candle("81287.03"))
+
+    with pytest.raises(ValueError, match="Kein Marktpreis für gehaltene Position BTCUSDC"):
+        ledger.mark({}, ts_ms=1_800_000)
+    with pytest.raises(ValueError, match="BTCUSDC"):
+        ledger.mark({"ETHUSDC": Decimal("2631.77")}, ts_ms=1_800_000)
+
+    # Mit Preis geht es unveraendert durch, und die Identitaet haelt.
+    v = ledger.mark({"BTCUSDC": Decimal("82000")}, ts_ms=1_800_000)
+    assert v.equity == v.cash + ledger.position("BTCUSDC").qty * Decimal("82000")
+
+
+def test_mark_bleibt_still_bei_geschlossener_position():
+    """Eine auf 0 verkaufte Position braucht keinen Marktpreis -- sie traegt
+    nichts zur Equity bei. Sonst waere die neue Strenge eine Falle fuer jeden
+    Lauf, der ein Symbol einmal gehandelt und wieder geschlossen hat."""
+    ledger = _ledger()
+    ledger.apply(Order("BTCUSDC", "BUY", Decimal("0.01")), _candle("81287.03"))
+    ledger.apply(Order("BTCUSDC", "SELL", Decimal("0.01")), _candle("81287.03", open_time=1_800_000))
+    assert ledger.position("BTCUSDC").qty == Decimal("0")
+    v = ledger.mark({}, ts_ms=2_700_000)  # wirft nicht
+    assert v.equity == v.cash
+
+
+def test_last_marks_merkt_sich_fill_und_mark_preise():
+    """last_marks ist die Grundlage dafuer, dass Aufrufer mit nur einem
+    bekannten Preis (execute.resolve_pending()) die uebrigen Positionen
+    ausdruecklich statt stillschweigend bewerten koennen."""
+    ledger = _ledger()
+    assert ledger.last_marks == {}
+    ledger.apply(Order("BTCUSDC", "BUY", Decimal("0.01")), _candle("81287.03"))
+    assert ledger.last_marks["BTCUSDC"] == Decimal("81287.03")  # candle.open, ohne Slippage
+    ledger.mark({"BTCUSDC": Decimal("82000")}, ts_ms=1_800_000)
+    assert ledger.last_marks["BTCUSDC"] == Decimal("82000")
+    ledger.last_marks["BTCUSDC"] = Decimal("1")  # Kopie, kein Durchgriff
+    assert ledger.last_marks["BTCUSDC"] == Decimal("82000")

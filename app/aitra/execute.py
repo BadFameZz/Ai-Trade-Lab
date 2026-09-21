@@ -153,7 +153,13 @@ def resolve_pending(ctx: ExecutionContext, candle: Candle) -> list[Fill]:
         held = ctx.ledger.position(row["symbol"]).qty
         proposal = Proposal(symbol=row["symbol"], action=row["action"],
                              position_pct=row["requested_position_pct"] or 0.0)
-        valuation = ctx.ledger.mark({row["symbol"]: candle.open}, ts_ms=ctx.clock.now_ms())
+        # Nur fuer candle.symbol liegt ein frischer Preis vor. Alle uebrigen
+        # gehaltenen Positionen werden ausdruecklich mit ihrem zuletzt
+        # bekannten Kurs bewertet: wuerden sie fehlen, fielen sie aus der
+        # Equity und erzeugten einen Scheinverlust, der ueber
+        # to_portfolio_state() bis in die Tagesverlustgrenze durchschlaegt.
+        marks = {**ctx.ledger.last_marks, candle.symbol: candle.open}
+        valuation = ctx.ledger.mark(marks, ts_ms=ctx.clock.now_ms())
         order = size_order(proposal, valuation, spec, ref_price, ctx.fee_bps, ctx.slippage_bps, held)
         if isinstance(order, Rejection):
             store.expire_decision(ctx.conn, row["id"])

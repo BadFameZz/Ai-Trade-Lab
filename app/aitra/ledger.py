@@ -85,11 +85,23 @@ class Ledger:
         self._fee_bps = fee_bps
         self._slippage_bps = slippage_bps
         self._positions: dict[str, Position] = {}
+        # Zuletzt gesehener Marktpreis je Symbol, aus mark() und aus jedem Fill.
+        # mark() verlangt fuer jede gehaltene Position einen Preis; dieser
+        # Speicher erlaubt Aufrufern, die nur den Preis EINES Symbols kennen
+        # (z. B. execute.resolve_pending() beim Eintreffen einer Kerze), die
+        # uebrigen Positionen ausdruecklich mit ihrem letzten bekannten Kurs zu
+        # bewerten -- statt sie stillschweigend aus der Equity fallen zu lassen.
+        self._last_marks: dict[str, Decimal] = {}
 
     @property
     def cash(self) -> Decimal:
         """Aktueller Kassenstand."""
         return self._cash
+
+    @property
+    def last_marks(self) -> dict[str, Decimal]:
+        """Kopie der zuletzt gesehenen Marktpreise je Symbol (siehe __init__)."""
+        return dict(self._last_marks)
 
     def position(self, symbol: str) -> Position:
         """Liefert die Position zu symbol, oder eine Nullposition falls keine gehalten wird."""
@@ -112,6 +124,7 @@ class Ledger:
             s = Decimal(str(self._slippage_bps)) / _BPS
             f = Decimal(str(self._fee_bps)) / _BPS
             p = candle_next.open  # E-006: ausschliesslich open + open_time der Folgekerze
+            self._last_marks[order.symbol] = p
             if order.side == "BUY":
                 exec_price = money.tick_up(p * (_ONE + s), spec.tick_size)
             elif order.side == "SELL":
@@ -168,8 +181,19 @@ class Ledger:
         self._positions[symbol] = Position(symbol, new_qty, new_avg, pos.realized_pnl + realized)
 
     def mark(self, marks: Mapping[str, Decimal], ts_ms: int) -> Valuation:
-        """Bewertet Kasse und Positionen zu den gegebenen Marktpreisen."""
+        """Bewertet Kasse und Positionen zu den gegebenen Marktpreisen.
+
+        Fehlt zu einer gehaltenen Position der Marktpreis, wirft mark() --
+        frueher wurde die Position stillschweigend uebersprungen. Dann gilt die
+        Identitaet equity = cash + Summe(qty * mark) nicht mehr: die
+        unbewertete Position faellt aus der Equity und erzeugt einen
+        Scheinverlust, der ueber to_portfolio_state() bis in die
+        Tagesverlustgrenze durchschlaegt (Kill Switch aus dem Nichts). Wer nur
+        den Preis eines Symbols kennt, ergaenzt die uebrigen ausdruecklich aus
+        last_marks -- sichtbar an der Aufrufstelle statt still hier drin.
+        """
         with decimal.localcontext(money.CTX):
+            self._last_marks.update(marks)
             position_value = Decimal(0)
             values: dict[str, Decimal] = {}
             for symbol, pos in self._positions.items():
@@ -177,7 +201,11 @@ class Ledger:
                     continue
                 price = marks.get(symbol)
                 if price is None:
-                    continue
+                    raise ValueError(
+                        f"Kein Marktpreis für gehaltene Position {symbol} (qty={pos.qty}); "
+                        f"mark() erhielt Preise für {sorted(marks)}. Ohne Preis waere die "
+                        f"Position aus der Equity gefallen (Scheinverlust)."
+                    )
                 value = pos.qty * price
                 values[symbol] = value
                 position_value += value
