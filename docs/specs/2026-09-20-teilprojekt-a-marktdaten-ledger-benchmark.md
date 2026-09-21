@@ -797,7 +797,33 @@ Eine Toleranz von 0,01 würde bei 10.000 Fills einen systematischen Gebührenfeh
 
 **A-2 · Kasse und Mengen bleiben nichtnegativ.**
 In denselben 10.000 Fills: `min(cash) ≥ 0` und `min(qty je Position) ≥ 0`, 0 Verletzungen.
-*Rot:* Die `INSUFFICIENT_CASH`-Prüfung in `sizing.py` entfernen → `cash < 0` tritt auf.
+*Rot:* ~~Die `INSUFFICIENT_CASH`-Prüfung in `sizing.py` entfernen → `cash < 0` tritt auf.~~
+
+> **Korrektur Fix-Welle A1 — der hier genannte Rot-Nachweis ist falsch.** Es gibt **zwei**
+> Kassenwächter, nicht einen: `sizing.py` deckelt die Ordergröße, und `Ledger.apply()` prüft
+> vor der Buchung ein zweites Mal (`if net > self._cash`). Nachgemessen im Container:
+> nur den Wächter in `sizing.py` entfernt → **beide** A-2-Tests bleiben grün (der Ledger fängt
+> es ab). Erst wenn **beide** entfernt sind, entsteht `cash < 0`:
+> `A-2 verletzt: Kasse -482.74576514 < 0 bei Schritt 55 (BUY ETHUSDC, OK)`.
+> Das ist kein Mangel, sondern die beabsichtigte zweite Schicht — der Spec-Text beschrieb nur
+> eine davon.
+>
+> **Zweite Korrektur: wo A-2 tatsächlich gemessen wird.** Der 10.000-Fill-Treiber in
+> `test_ledger.py` rechnet die Menge selbst aus und ruft `Ledger.apply()` direkt; `sizing.py`
+> liegt dort gar nicht im Pfad. Er deckelt zudem den Kauf selbst auf 95 % der Kasse und den
+> Verkauf auf `pos.qty` — eine negative Kasse oder Menge ist dort **strukturell unmöglich**,
+> unabhängig vom Produktivcode. Nachgemessen: beide Kassenwächter entfernt → `1 passed`;
+> Bestandswächter (`qty > pos.qty`) entfernt → `1 passed`. Die Zeilen bleiben dort stehen
+> (die Spec verlangt die Prüfung in denselben 10.000 Fills), die **belastbare** A-2-Messung ist
+> aber `tests/test_execute.py::test_a2_kasse_und_mengen_nichtnegativ_ueber_execute_proposal`:
+> 400 Vorschläge über `RiskEngine.check()` → `size_order()` → `Ledger.apply()`, geprüft nach
+> jedem Aufruf. Dort müssen außerdem die übrigen Risikoschranken aufgezogen sein
+> (`max_total_exposure_pct = 10_000`), sonst hält schon `MAX_EXPOSURE` die Kasse über null und
+> der Test misst den Kassenwächter gar nicht.
+>
+> Abnahmebefehle:
+> `python -m pytest -q tests/test_execute.py::test_a2_kasse_und_mengen_nichtnegativ_ueber_execute_proposal`
+> `python -m pytest -q tests/test_ledger.py::test_buchhaltung_identitaet_a1`
 
 **A-3 · Quantisierung, 1.000 Stichproben.**
 Für 1.000 Ordergrößen (fest hinterlegt, von 6 bis 1.000 USDC über drei Größenordnungen) gilt:
