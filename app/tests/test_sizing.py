@@ -117,30 +117,47 @@ def test_a4b_effektive_mindestordergroesse_ist_real():
 
 
 def test_a5_losgroessenverlust_ist_beziffert():
-    """A-5: Abwärtsrundung auf Schrittweite garantiert 0 <= Rest < step*preis.
+    """A-5: Abwärtsrundung auf korrekte Schrittweite garantiert 0 <= Rest < step*preis.
 
-    Der Rest nach Abwärtsrundung ist nie negativ und immer kleiner als das
-    Produkt aus Schrittweite und Preis. Diese Invariante gilt für jeden Preis.
+    Der Rest nach Abwärtsrundung auf spec.step_size ist nie negativ und immer
+    kleiner als das Produkt aus Schrittweite und Preis. Mit falscher Schrittweite
+    (z.B. 10x größer) wird die Invariante verletzt.
     """
+    # Teil 1: Korrekte Schrittweite (spec.step_size)
     max_rest = Decimal(0)
     max_rest_pct = Decimal(0)
+    verletzungen = 0
     for i in range(1000):
-        price = Decimal("80787") + Decimal(i) * Decimal("1")  # 1.000 Stufen um 81.287
+        price = Decimal("80787") + Decimal(i) * Decimal("1")
         raw_qty = Decimal("1000") / price
         qty = money.step_down(raw_qty, BTC.step_size)
         rest = Decimal("1000") - qty * price
 
-        # Exakte Invariante: Rest ist nicht-negativ und kleiner als Schrittweite * Preis
-        assert rest >= Decimal(0), f"Rest darf nicht negativ sein: {rest} bei Preis {price}"
-        max_allowed = BTC.step_size * price
-        assert rest < max_allowed, f"Rest {rest} >= {max_allowed} bei Preis {price}"
+        # Mit korrekter Schrittweite: Rest >= 0 und Rest < step_size * price
+        if rest < Decimal(0) or rest >= BTC.step_size * price:
+            verletzungen += 1
 
         max_rest = max(max_rest, rest)
         rest_pct = rest / Decimal("1000") * Decimal(100)
         max_rest_pct = max(max_rest_pct, rest_pct)
 
-    # Zusätzliche Info: prozentualer Verlust liegt deutlich unter 0,1%
-    assert max_rest_pct < Decimal("0.1")
+    assert verletzungen == 0, f"Mit korrekter Schrittweite: {verletzungen} Invariantenverletzungen"
+    assert max_rest_pct < Decimal("0.1"), f"Prozentualer Verlust {max_rest_pct}% > 0.1%"
+
+    # Teil 2: Falsche Schrittweite (10x größer) sollte Invariante verletzen
+    verletzungen_falsch = 0
+    for i in range(1000):
+        price = Decimal("80787") + Decimal(i) * Decimal("1")
+        raw_qty = Decimal("1000") / price
+        qty = money.step_down(raw_qty, BTC.step_size * Decimal(10))
+        rest = Decimal("1000") - qty * price
+
+        # Mit falscher Schrittweite: Invariante kann verletzt sein
+        if rest < Decimal(0) or rest >= BTC.step_size * price:
+            verletzungen_falsch += 1
+
+    # Mit falscher Schrittweite sollten Verletzungen auftreten
+    assert verletzungen_falsch > 0, f"Falsche Schrittweite verletzt Invariante nicht! ({verletzungen_falsch} Verletzungen)"
 
 
 def test_a8b_keine_versteckte_uhr_kein_versteckter_zufall():
