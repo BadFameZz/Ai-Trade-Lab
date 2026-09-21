@@ -134,6 +134,27 @@ einer DB vor Migration 4).
 
 ## Kosten bei Irrtum
 
+> **Nachgetragen am 2026-09-21, nach der Auflösung über Weg A.** Die drei Absätze darunter
+> wiegen das Risiko des *unaufgelösten* Zustands aus A1 ab. Sie bleiben als Beleg stehen. Was
+> fehlte, ist das Risiko der jetzt getroffenen Entscheidung selbst:
+
+**Wenn Weg A falsch war** — also das Einfrieren der Menge schlechter ist als das Neubemessen:
+Zwischen Entscheidung und Füllkerze kann die Kasse durch einen Fill in einem *anderen* Symbol
+schrumpfen. Die eingefrorene Order passt dann nicht mehr, und `Ledger.apply()` lehnt sie mit
+`INSUFFICIENT_CASH` vollständig ab, statt sie zu verkleinern. Der Vorschlag ist verloren,
+obwohl eine kleinere Order durchgegangen wäre. Das ist bei zwei Symbolen und höchstens 10 %
+Positionsgröße je Order selten, wird aber häufiger, je mehr Symbole gleichzeitig laufen und je
+näher das Portfolio an der Vollinvestition steht.
+**Erkennbar an:** gehäuften `INSUFFICIENT_CASH`-Ablehnungen an schwebenden Zeilen im Journal,
+während die Kasse zum Entscheidungszeitpunkt ausgereicht hätte.
+**Gegenmittel, falls es eintritt:** beim Auflösen auf die verfügbare Kasse deckeln — die Menge
+also nach unten anpassen, aber nie nach oben. Das bleibt vorgriffsfrei, weil ein Deckel nur
+Information über die *Gegenwart* braucht, keine über den Füllpreis.
+**Was es kostet, das jetzt schon einzubauen:** ein Sonderweg im Buchungspfad, der ohne
+gemessenen Anlass existiert — und damit genau die Art Komplexität, die später niemand mehr
+zu entfernen wagt.
+
+
 **Wenn die Einschätzung „in A1 folgenlos" falsch ist** (es gäbe doch einen A1-Pfad, der
 `resolve_pending()` erreicht): Dann wären die Ordergrößen dieses Pfads gegen die Füllkerze
 bemessen. Der Fehler wäre klein (er skaliert mit der Lücke zwischen Schluss- und

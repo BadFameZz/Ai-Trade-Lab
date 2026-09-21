@@ -1,7 +1,13 @@
 """execute_proposal(): das Nadeloehr (E-003).
 
-Die einzige Funktion im Paket, die Ledger.apply() aufruft (A-6b) — verbindet
-RiskEngine.check() -> sizing.size_order() -> Ledger.apply() -> Journal (decisions/fills).
+Die einzige *Datei* im Paket, aus der Ledger.apply() aufgerufen wird (A-6b) —
+darin zwei Wege: execute_proposal() verbindet RiskEngine.check() ->
+sizing.size_order() -> Ledger.apply() -> Journal (decisions/fills), und
+resolve_pending() bucht eine bereits bemessene Order ohne erneute Bemessung.
+Der Waechter prueft die aufrufende Datei, nicht die Funktion — wer hier eine
+dritte buchende Funktion ergaenzt, kommt an ihm vorbei. Die Regel lautet:
+gebucht wird nur aus diesem Modul, und jeder Weg hierher fuehrt durch die
+RiskEngine, entweder sofort oder beim Einstellen des Vorschlags.
 Verwaltet zusaetzlich schwebende Vorschlaege (E-006): Ohne next_candle wird der
 Vorschlag als pending_fill abgelegt, bis resolve_pending() die gespeicherte Order
 mit einer Folgekerze bucht (E-010, Weg A), oder expire_stale_pending() ihn nach
