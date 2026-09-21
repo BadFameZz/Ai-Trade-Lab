@@ -163,10 +163,24 @@ der Standardbibliothek und voneinander ab.
 | `benchmark.py` | 70 | `BuyAndHold` — eine zweite `Ledger`-Instanz, genau ein BUY, danach nur `mark()` | `ledger`, `money` |
 | `replay.py` | 120 | `run_replay(candles, decide_fn, ctx)` mit `SimClock` und lauf-lokalem Kill Switch (E-008); `__main__` als CLI | `marketdata`, `execute`, `benchmark` |
 | `poller.py` | 160 | Live-Betriebsart: Thread, Backoff, Kerzen persistieren, Veraltet-Erkennung → Kill Switch, schwebende Fills ausführen, Equity-Schnappschüsse | `binance`, `marketdata`, `execute`, `store` |
-| `store.py` | 190 | Lese-/Schreibzugriff auf die neuen Tabellen. Geld nur über `money` in TEXT und zurück | `db`, `money` |
+| `store.py` | **289** *(geschätzt waren 190)* | Lese-/Schreibzugriff auf die neuen Tabellen. Geld nur über `money` in TEXT und zurück | `db`, `money` |
 | `backfill.py` | 70 | `python -m aitra.backfill --symbol … --interval … --days …`, im Container aufgerufen | `binance`, `store` |
 
 **Summe geschätzt: ~1.345 neue Zeilen** (Bestand 485 → ~1.850). Kein Modul über 200 Zeilen.
+
+> **Nachtrag Fix-Welle A1 — gemessen statt geschätzt.** Die Schätzung für `store.py` war
+> falsch, nicht die Struktur: es sind **289 Zeilen** (244 nicht leer), 19 flache
+> CRUD-Funktionen über 6 Tabellen und genau die eine Verantwortung, die diese Tabelle dem
+> Modul zuschreibt. *Ruling (bereits gefällt, Aufgabe 3):* `store.py` bleibt ungeteilt —
+> Zweck der 200-Zeilen-Regel ist Fokus, nicht die Zahl; ein Aufteilen müsste eine Naht
+> erfinden, die der Entwurf nicht hat. *Kosten bei Irrtum:* wächst `store.py` in A2 um die
+> Poller-Zugriffe weiter, an der natürlichen Naht trennen (Marktdaten / Lauf+Ledger) —
+> umkehrbar in einem Commit.
+>
+> **Offen, braucht ein eigenes Ruling:** Nach der Fix-Welle liegen auch
+> `replay.py` (**269**), `web.py` (**218**) und `ledger.py` (**227**) über 200 Zeilen.
+> Die Randbedingung „Kein Modul über 200 Zeilen" gilt damit für vier Module nicht mehr
+> und ist entweder anzupassen oder durch Aufteilen einzulösen.
 
 ### 3.2 Geändert
 
@@ -755,7 +769,7 @@ am Ende zusätzlich `cash_end − (cash_start − Σ net(BUY) + Σ net(SELL)) ==
 *Warum nicht 0,01 USDC:* Abschnitt 6.4 zeigt, dass jede Operation bei `prec=34` exakt ist.
 Eine Toleranz von 0,01 würde bei 10.000 Fills einen systematischen Gebührenfehler von bis zu
 100 USDC durchlassen.
-`python -m pytest -q tests/test_ledger.py::test_buchhaltung_identitaet`
+`python -m pytest -q tests/test_ledger.py::test_buchhaltung_identitaet_a1`
 *Rot:* Die Gebühr beim Kassenabzug weglassen (nur im `Fill`, nicht in `cash`) → Differenz ≈ 2.000 USDC.
 
 **A-2 · Kasse und Mengen bleiben nichtnegativ.**
