@@ -13,14 +13,15 @@
 - **Sicherheitshinweis:** Der Container baut jetzt ausgehende HTTPS-Verbindungen zu
   `api.binance.com` auf (öffentliche Marktdaten, nur lesend). Es werden ausschließlich
   Symbol, Intervall und Zeitraum übertragen — keine Kontodaten, keine Kennungen, keine
-  API-Schlüssel; solche existieren im Projekt nicht
+  API-Schlüssel für Binance; solche existieren im Projekt nicht. Davon unberührt ist
+  der Admin-Token für das eigene Dashboard (README, Abschnitt „Sicherheit")
 - **Handgriff für bestehende Installationen:** Ein Update überschreibt die `.env` nicht
   (dort steht der Admin-Token). Wer von v0.2.x aktualisiert, läuft mit
   `STARTING_BALANCE=100` weiter — deutlich unter dem jetzt vorgesehenen Handelsfenster.
   Auf dem Zielcontainer einmalig:
   ```bash
   pct exec <CTID> -- sed -i 's/^STARTING_BALANCE=.*/STARTING_BALANCE=10000/' /opt/ai-trade-lab/.env
-  pct exec <CTID> -- docker compose -f /opt/ai-trade-lab/docker-compose.yml restart
+  pct exec <CTID> -- docker compose -f /opt/ai-trade-lab/docker-compose.yml up -d
   ```
   Wird das übersehen, warnt die App seit dieser Version selbst: ein zu enges
   Handelsfenster erzeugt beim Start ein `NARROW_TRADING_WINDOW`-Ereignis (sichtbar unter

@@ -5,11 +5,13 @@ komplett lokal: Konfiguration, Datenbank, Dashboard und Ausführung bleiben auf 
 eigenen Server. Eine Ausnahme seit v0.3.0: Für Kursdaten ruft die App die öffentlichen,
 lesenden Endpunkte von `api.binance.com` ab. Dabei werden ausschließlich Symbol,
 Intervall und Zeitraum übertragen — **keine Kontodaten, keine Kennungen, keine
-API-Schlüssel**; solche existieren im Projekt nicht. Der Quellcode liegt in einem
-privaten GitHub-Repo; im Betrieb ruft die App nichts davon ab.
+API-Schlüssel für Binance**; solche existieren im Projekt nicht. Davon unberührt ist
+der Admin-Token für das eigene Dashboard, siehe Abschnitt „Sicherheit". Der Quellcode
+liegt in einem privaten GitHub-Repo; im Betrieb ruft die App nichts davon ab.
 
 > Kein Trading-Bot mit Gewinngarantie. Aktuell: Dashboard, Persistenz, Risk Engine,
-> Kill Switch, Health. Marktdaten, Paper-Ledger und Strategien folgen (Phase 2+).
+> Kill Switch, Health, Marktdaten (Binance, nur lesend), Paper-Ledger mit Benchmark.
+> Eigene Strategien und Backtests folgen (Phase 2+).
 
 ## Installation (vom Mac aus)
 
@@ -40,7 +42,7 @@ nicht (dort steht der Admin-Token). Bestandscontainer laufen danach mit
 
 ```bash
 pct exec <CTID> -- sed -i 's/^STARTING_BALANCE=.*/STARTING_BALANCE=10000/' /opt/ai-trade-lab/.env
-pct exec <CTID> -- docker compose -f /opt/ai-trade-lab/docker-compose.yml restart
+pct exec <CTID> -- docker compose -f /opt/ai-trade-lab/docker-compose.yml up -d
 ```
 
 ## Sicherheit
@@ -89,7 +91,8 @@ cd app && pip install -r requirements.txt pytest && python -m pytest -q
 
 ## Nächste Schritte (Roadmap aus der Projektdoku)
 
-1. Öffentliche Marktdaten (Binance Spot, nur lesend) inkl. Veraltet-Erkennung → Kill Switch
-2. Paper-Ledger mit Gebühren, Slippage, Mindestordergrößen
-3. Benchmark-Portfolios (BTC Buy & Hold, einfache Regelstrategie)
-4. Erste deterministische Strategien + Backtests
+Seit v0.3.0 umgesetzt: öffentliche Marktdaten (Binance Spot, nur lesend) inkl.
+Veraltet-Erkennung → Kill Switch, Paper-Ledger mit Gebühren/Slippage/
+Mindestordergrößen, Benchmark-Portfolio (BTC Buy & Hold).
+
+1. Erste deterministische Strategien + Backtests
