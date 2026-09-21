@@ -363,3 +363,162 @@ def test_start_erzeugt_thread_der_nach_stop_event_deterministisch_auslaeuft(tmp_
     assert len(rows) >= 1, (
         "Pruefflaeche zu schwach: start() hat im Worker-Thread keine Kerze gespeichert"
     )
+
+
+def test_poll_once_meldet_warn_ohne_kill_switch_und_schreibt_genau_ein_lagging_ereignis(tmp_path):
+    """Ergaenzung 1, Fixrunde 1 (Luecke im Brief, vom Reviewer gefunden): der
+    warn-Zwischenzustand (MARKET_DATA_LAGGING) hatte bisher keine Pruefflaeche
+    - nur 'ok' und 'stale' waren getestet. Datenalter 2000s liegt zwischen
+    warn_eff=1350s und kill_eff=2700s (15m-Intervall, Vorgabeschwellen)."""
+    clock = SimClock(10_000_000)
+    kerzen = {"BTCUSDC": [_kerze(clock.now_ms() - 2_000_000 - 900_000, 900)]}
+    client = _client_fuer(kerzen, clock.now_ms())
+    conn = db.connect(tmp_path / "a.db")
+    db.migrate(conn)
+    pc = poller.build_context(conn, _cfg(tmp_path), SPECS, clock=clock, client=client)
+
+    outcome = poller.poll_once(pc)
+    assert outcome.staleness.status == "warn"
+    assert db.get_state(conn, "kill_switch", "0") == "0"
+    ereignisse = conn.execute(
+        "SELECT COUNT(*) c FROM events WHERE event='MARKET_DATA_LAGGING'"
+    ).fetchone()["c"]
+    assert ereignisse == 1, f"genau ein Ereignis erwartet, gemessen: {ereignisse}"
+
+
+def test_poll_once_bleibt_ok_knapp_unter_der_warn_schwelle(tmp_path):
+    """Grenzwert-Gegenprobe zum vorigen Test: Datenalter 1349s liegt knapp
+    UNTER warn_eff=1350s (max(150, 1.5*900), 15m-Intervall) - status muss
+    'ok' bleiben, kein MARKET_DATA_LAGGING-Ereignis. Ohne diese Grenze waere
+    der warn-Pfad zwar aufgerufen, aber nicht wirklich an der richtigen
+    Schwelle geprueft (Reviewer-Rot-Nachweis Fixrunde 1: der Faktor 1,5 liess
+    sich auf 1,4 aendern, ohne dass ein einziger Poller-Test rot wurde -
+    dieser Test haette es getan, weil 1349 > 1,4*900=1260, aber < 1,5*900=1350)."""
+    clock = SimClock(10_000_000)
+    kerzen = {"BTCUSDC": [_kerze(clock.now_ms() - 1_349_000 - 900_000, 900)]}
+    client = _client_fuer(kerzen, clock.now_ms())
+    conn = db.connect(tmp_path / "a.db")
+    db.migrate(conn)
+    pc = poller.build_context(conn, _cfg(tmp_path), SPECS, clock=clock, client=client)
+
+    outcome = poller.poll_once(pc)
+    assert outcome.staleness.status == "ok", f"gemessen: {outcome.staleness}"
+    ereignisse = conn.execute(
+        "SELECT COUNT(*) c FROM events WHERE event='MARKET_DATA_LAGGING'"
+    ).fetchone()["c"]
+    assert ereignisse == 0, f"kein Ereignis erwartet, gemessen: {ereignisse}"
+
+
+def _client_mit_dynamischer_serverzeit(kerzen_je_symbol: dict[str, list], clock: SimClock) -> BinanceClient:
+    """Wie _client_fuer(), aber serverTime folgt der Uhr statt an ihrem
+    Konstruktionszeitpunkt zu haengen. Noetig, sobald ein Test die Uhr ueber
+    mehrere poll_once()-Aufrufe hinweg vorstellt UND denselben Client
+    wiederverwendet: sonst wird server_time_ms nach dem ersten Aufruf nur noch
+    alle 15 min neu geholt (_TIME_CHECK_INTERVAL_MS) und veraltet dabei
+    schneller als die Uhr - der Uhrversatz allein loest dann 'stale' aus,
+    unabhaengig vom eigentlich getesteten Datenalter (genau der Fehler, den
+    der erste Entwurf dieses Tests hatte, gemessen)."""
+    def klines(url):
+        qs = parse_qs(urlsplit(url).query)
+        sym = qs["symbol"][0]
+        return FakeAntwort(_body(kerzen_je_symbol[sym]))
+
+    def zeit(url):
+        return FakeAntwort(_body({"serverTime": clock.now_ms()}))
+
+    opener = FakeOpener({"/api/v3/klines": klines, "/api/v3/time": zeit})
+    return BinanceClient(BASIS, opener=opener)
+
+
+def test_poll_once_drosselt_lagging_ereignisse_auf_hoechstens_eins_pro_15min(tmp_path):
+    """Ergaenzung 1, Fixrunde 1: mehrere Polls hintereinander im warn-Fenster
+    duerfen wegen der Drosselung (last_lagging_event_ms, 900_000 ms) nicht je
+    ein Ereignis erzeugen. Start bei Datenalter 1400s (knapp ueber
+    warn_eff=1350s), drei Vorstellungen der Uhr um je 300s (900s kumuliert
+    genau an der Drosselschwelle, Datenalter am Ende 2300s - weiterhin sicher
+    unter kill_eff=2700s, also weiterhin 'warn', nie 'stale').
+
+    market_clock_skew_kill_s wird hochgesetzt: server_time() wird laut Spec
+    11.3 hoechstens alle 15 min neu geholt (_TIME_CHECK_INTERVAL_MS), unsere
+    Sprünge bleiben bewusst darunter (300s je Schritt) - zwischen zwei
+    Aktualisierungen waechst der gemessene Uhrversatz einer SimClock (die
+    springt statt zu ticken) sonst unabhaengig vom hier getesteten Datenalter
+    und würde faelschlich selbst 'stale' ausloesen. Das ist kein Freibrief:
+    es isoliert nur die hier geprüfte Eigenschaft (Drosselung des
+    warn-Ereignisses) von einer zweiten, bereits anderswo geprüften Schwelle
+    (Uhrversatz, A-11b)."""
+    clock = SimClock(10_000_000)
+    kerzen = {"BTCUSDC": [_kerze(clock.now_ms() - 1_400_000 - 900_000, 900)]}
+    client = _client_mit_dynamischer_serverzeit(kerzen, clock)
+    conn = db.connect(tmp_path / "a.db")
+    db.migrate(conn)
+    cfg = _cfg(tmp_path, market_clock_skew_kill_s=100_000)
+    pc = poller.build_context(conn, cfg, SPECS, clock=clock, client=client)
+
+    def anzahl_lagging() -> int:
+        return conn.execute(
+            "SELECT COUNT(*) c FROM events WHERE event='MARKET_DATA_LAGGING'"
+        ).fetchone()["c"]
+
+    outcome = poller.poll_once(pc)
+    assert outcome.staleness.status == "warn"
+    assert anzahl_lagging() == 1, f"erstes Ereignis erwartet, gemessen: {anzahl_lagging()}"
+
+    for _ in range(2):  # kumuliert 600s - weiterhin innerhalb der 900s-Drossel
+        clock.set(clock.now_ms() + 300_000)
+        outcome = poller.poll_once(pc)
+        assert outcome.staleness.status == "warn"
+    gemessen_gedrosselt = anzahl_lagging()
+    assert gemessen_gedrosselt == 1, (
+        f"waehrend der Drosselung erwartet: 1 Ereignis, gemessen: {gemessen_gedrosselt}"
+    )
+
+    clock.set(clock.now_ms() + 300_000)  # kumuliert 900s - Drosselschwelle erreicht
+    outcome = poller.poll_once(pc)
+    assert outcome.staleness.status == "warn"
+    gemessen_nach_drossel = anzahl_lagging()
+    assert gemessen_nach_drossel == 2, (
+        f"nach Ablauf der Drosselschwelle erwartet: 2 Ereignisse, gemessen: {gemessen_nach_drossel}"
+    )
+
+
+def test_run_forever_loggt_poll_cycle_exception_bei_unerwartetem_fehler(tmp_path, monkeypatch):
+    """Blocker aus Fixrunde 1: ein Fehler VOR der Veraltet-Pruefung (z. B. ein
+    Tippfehler wie pc.ctx.ledgar statt pc.ctx.ledger) darf nicht spurlos nach
+    stderr verschwinden - sonst friert market_data_status/kill_switch auf dem
+    letzten Wert ein, waehrend nirgends in der DB sichtbar wird, dass der
+    Poller seitdem in Backoff haengt."""
+    monkeypatch.setattr(poller, "BACKOFF_STEPS_S", (0, 0, 0, 0))
+    clock = SimClock(10_000_000)
+    kerzen = {"BTCUSDC": [_kerze(clock.now_ms() - 100 - 900_000, 900)]}
+    client = _client_fuer(kerzen, clock.now_ms())
+    conn = db.connect(tmp_path / "a.db")
+    db.migrate(conn)
+    cfg = _cfg(tmp_path, market_poll_s=0)
+    pc = poller.build_context(conn, cfg, SPECS, clock=clock, client=client)
+
+    calls = {"n": 0}
+    stop_event = threading.Event()
+
+    def kaputter_poll_once(pc_arg):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise AttributeError("Testdouble: pc.ctx.ledgar statt pc.ctx.ledger")
+        stop_event.set()
+        return poller.PollOutcome(ok=True, staleness=None, fills=[], backoff_s=0.0)
+
+    monkeypatch.setattr(poller, "poll_once", kaputter_poll_once)
+
+    thread = threading.Thread(target=poller.run_forever, args=(pc, stop_event), daemon=True)
+    thread.start()
+    thread.join(timeout=5)
+
+    assert not thread.is_alive(), "Thread lief nach stop_event.set() nicht aus (Beweis: joint nicht)"
+    ereignisse = conn.execute(
+        "SELECT COUNT(*) c FROM events WHERE event='POLL_CYCLE_EXCEPTION'"
+    ).fetchone()["c"]
+    assert ereignisse == 1, f"genau ein POLL_CYCLE_EXCEPTION erwartet, gemessen: {ereignisse}"
+    detail = conn.execute(
+        "SELECT detail FROM events WHERE event='POLL_CYCLE_EXCEPTION'"
+    ).fetchone()["detail"]
+    assert detail == "AttributeError", f"Ausnahmetyp im Detail erwartet, gemessen: {detail!r}"

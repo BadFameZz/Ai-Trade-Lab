@@ -25,6 +25,42 @@ def test_kein_modul_ueber_der_300_zeilen_marke():
     assert zu_gross == {}, f"ueber der 300-Zeilen-Marke: {zu_gross}"
 
 
+SPEC_31B = (
+    Path(__file__).resolve().parent.parent.parent
+    / "docs/specs/2026-09-20-teilprojekt-a-marktdaten-ledger-benchmark.md"
+)
+
+
+def _spec_31b_abschnitt() -> str:
+    """Nur der Text zwischen der 3.1b-Ueberschrift und der naechsten
+    Ueberschrift - sonst wuerde ein Modulname, der irgendwo sonst im
+    Dokument in Backticks auftaucht, den Test faelschlich gruen halten."""
+    text = SPEC_31B.read_text()
+    start = text.index("### 3.1b")
+    ende = text.index("\n### ", start + 1)
+    return text[start:ende]
+
+
+def test_jedes_modul_ueber_200_zeilen_hat_eine_begruendungszeile_in_spec_3_1b():
+    """Fixrunde 1 zu A2/Aufgabe 5 (Reviewer-Befund): die Tabelle in Spec 3.1b
+    war flaechendeckend veraltet - zwei Module (config.py, poller.py) fehlten
+    ganz, fuenf weitere hatten falsche Zeilenzahlen. Dieser Test sichert nur
+    die EXISTENZ einer Begruendungszeile je Modul ueber dem 200er-Richtwert
+    zu, nicht die exakte Zeilenzahl - sonst braeche der Test bei jeder
+    Kleinigkeit und wuerde irgendwann abgeschaltet (Ruling des Koordinators)."""
+    assert SPEC_31B.exists(), f"Spec-Datei nicht gefunden: {SPEC_31B}"
+    abschnitt = _spec_31b_abschnitt()
+
+    ueber_200 = sorted(
+        p.name for p in AITRA.glob("*.py")
+        if p.name != "__init__.py" and len(p.read_text().splitlines()) > 200
+    )
+    assert len(ueber_200) >= 1, "Pruefflaeche zu klein: kein Modul ueber 200 Zeilen gefunden"
+
+    fehlend = [name for name in ueber_200 if f"`{name}`" not in abschnitt]
+    assert fehlend == [], f"Module ueber 200 Zeilen ohne Begruendungszeile in Spec 3.1b: {fehlend}"
+
+
 def test_store_und_store_run_sind_wirklich_getrennt():
     """Die Naht aus Spec 3.1b: Marktdaten hier, Lauf und Ledger dort.
 

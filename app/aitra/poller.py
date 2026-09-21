@@ -226,18 +226,39 @@ def run_forever(pc: PollerContext, stop_event: threading.Event) -> None:
     """Thread-Ziel: poll_once() alle market_poll_s Sekunden, mit Backoff bei
     Fehlern. Endet, sobald stop_event gesetzt ist.
 
-    Faengt bewusst jede Ausnahme, nicht nur BinanceError: poll_once() ist der
-    einzige Ort, an dem auch ein Programmierfehler (etwa in der Bewertung)
-    auftreten koennte, und ein Thread, der dabei stirbt, nimmt die
-    Veraltet-Erkennung mit sich - genau der Fehler, den binance.py in
-    Fixrunde 1 fuer den Netzcode bereits behoben hat (siehe Modul-Docstring)."""
+    Faengt bewusst JEDE Ausnahme, nicht nur BinanceError: poll_once() ist der
+    einzige Ort, an dem auch ein Programmierfehler auftreten koennte (z. B.
+    ein Tippfehler wie pc.ctx.ledgar statt pc.ctx.ledger), und ein Thread, der
+    dabei stirbt, nimmt die Veraltet-Erkennung mit sich - genau der Fehler,
+    den binance.py in Fixrunde 1 fuer den Netzcode bereits behoben hat (siehe
+    Modul-Docstring). Das ist eine BEWUSSTE Entscheidung, keine Nachlaessigkeit:
+    ein toter Poller ist schlimmer als ein fehlerhafter, der wenigstens die
+    Chance hat, sich beim naechsten Zyklus zu erholen. Diesen except-Zweig
+    spaeter auf `except BinanceError` zu verengen, wuerde genau diesen Schutz
+    wieder entfernen.
+
+    Fixrunde 1 (Reviewer-Befund): dieser Zweig schrieb ursprünglich NUR nach
+    stderr (log.exception) - anders als jeder Binance-Fehlerpfad in
+    poll_once(), der ein db.log_event() hinterlaesst. Ein Fehler VOR der
+    Veraltet-Pruefung (z. B. der oben genannte Tippfehler) fror
+    market_data_status/kill_switch damit auf ihrem letzten Wert ein, OHNE dass
+    irgendwo in der Datenbank sichtbar wurde, dass der Poller ueberhaupt in
+    Backoff haengt: das Dashboard zeigt weiter 'ok', obwohl seit Stunden keine
+    Kerze mehr ankommt - die Veraltet-Erkennung, die genau das bemerken soll,
+    wird von diesem Fehlerpfad lahmgelegt. Jetzt wird ein
+    POLL_CYCLE_EXCEPTION-Ereignis geschrieben, mit dem Ausnahmetyp (nie der
+    vollen Meldung - die kann Antwortinhalte tragen, E-005)."""
     while not stop_event.is_set():
         try:
             outcome = poll_once(pc)
             wait_s = outcome.backoff_s if outcome.backoff_s > 0 else pc.cfg.market_poll_s
-        except Exception:
+        except Exception as e:
             pc.consecutive_failures += 1
             log.exception("poll_once() unerwarteter Fehler - Thread bleibt am Leben (Backoff)")
+            try:
+                db.log_event(pc.conn, "POLLER", "ERROR", "POLL_CYCLE_EXCEPTION", type(e).__name__)
+            except Exception:
+                pass  # die DB-Verbindung selbst koennte der Grund fuer den Fehler sein
             wait_s = _backoff(pc.consecutive_failures)
         stop_event.wait(wait_s)
 

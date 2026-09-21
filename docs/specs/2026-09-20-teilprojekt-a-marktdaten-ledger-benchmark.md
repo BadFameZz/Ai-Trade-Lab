@@ -173,7 +173,7 @@ der Standardbibliothek und voneinander ab.
 ### 3.1b Die 200-Zeilen-Regel ist ein Richtwert, keine Grenze *(Ruling Fix-Welle A1)*
 
 Die ursprüngliche Randbedingung lautete „Kein Modul über 200 Zeilen". Sie ist **gescheitert**:
-nach der Fix-Welle überschreiten sie **sechs von zwölf** Modulen, jedes aus nachvollziehbarem
+nach der Fix-Welle überschritten sie **sechs von zwölf** Modulen, jedes aus nachvollziehbarem
 Grund. Das wird hier festgehalten statt stillschweigend übergangen — am Ende umzubauen wäre
 schlechter als die Regel ehrlich zu korrigieren.
 
@@ -181,17 +181,23 @@ schlechter als die Regel ehrlich zu korrigieren.
 - **200 Zeilen sind ein Richtwert.** Wer ihn überschreitet, begründet es hier in der Tabelle.
 - **Ab 300 Zeilen wird geteilt.** Das ist die harte Marke.
 
-Gemessen am 2026-09-21 (`wc -l app/aitra/*.py`):
+Gemessen am 2026-09-21, Fixrunde 1 zu A2/Aufgabe 5 (`wc -l app/aitra/*.py`, nicht-leer über
+`grep -c '[^[:space:]]'`) — **neun von sechzehn** Modulen liegen über dem Richtwert, keines über
+der harten Marke. `test_modulgroesse.py` sichert seit Fixrunde 1 zusätzlich zu, dass jedes Modul
+über 200 Zeilen hier eine Zeile hat (nur Existenz, nicht die exakte Zahl — sonst bricht der Test
+bei jeder Kleinigkeit):
 
 | Modul | Zeilen | nicht leer | Warum über 200 |
 |---|---:|---:|---|
-| `store_run.py` | **208** | 178 | 14 flache CRUD-Funktionen über 5 lauf-/ledgerbezogene Tabellen (`runs`, `fills`, `positions`, `equity_curve`, die Lauf-Spalten von `decisions`), genau eine Verantwortung — die Naht zu `store.py` (Marktdaten) darunter. |
-| `replay.py` | **283** | 233 | Engine *und* CLI in einem Modul — so von Abschnitt 3.1 vorgegeben („`__main__` als CLI"). Gewachsen um `--strategie` (A-8c), Equity-Kurve, `finish_run`, `_iso_ms` (UTC). |
-| `ledger.py` | **227** | 192 | Gewachsen um die strenge `mark()` (wirft bei Position ohne Marktpreis) und `last_marks`. Fast nur Docstring, der das *Warum* trägt. |
-| `web.py` | **218** | 188 | Bestand, von der Fix-Welle nicht berührt. |
-| `execute.py` | **204** | 178 | Gewachsen um `reject_decision()` an sieben Stellen und `pending_ref_price`. |
-| `db.py` | **201** | 175 | Gewachsen um Migration 3 samt Begründung im SQL-Kommentar. |
-| `binance.py` | **280** | 235 *(A2, Aufgabe 3 + Fixrunde 1, gemessen am 2026-09-21)* | Der einzige Netzzugang des Pakets bündelt jede Härtung an einer Stelle, weil es keine zweite gibt: fünf Ausnahmeklassen, ein eigener Redirect-Handler (A-17b), ein Host-/Schema-Wächter, der im Konstruktor **und** vor jeder Einzelanfrage läuft (A-17), defensive `Decimal`-Wandlung mit float/bool-Ablehnung (E-002, mit eigenem Kommentar, warum beide Prüfungen bleiben), drei Endpunkte (`server_time`, `klines`, `exchange_info`) samt Gewichtszähler (A-17c), ein nach oben gedeckelter `Retry-After` und ein Fangzweig für Netzfehler jenseits von `URLError` (`OSError`, `http.client.HTTPException` — Fixrunde 1, Befund 1). Rund ein Drittel der Zeilen sind Docstrings, die das Warum jeder Prüfung tragen. |
+| `store_run.py` | **224** | 181 | 14 flache CRUD-Funktionen über 5 lauf-/ledgerbezogene Tabellen (`runs`, `fills`, `positions`, `equity_curve`, die Lauf-Spalten von `decisions`), genau eine Verantwortung — die Naht zu `store.py` (Marktdaten) darunter. *A2, Aufgabe 5:* `ensure_run()` ergänzt (idempotentes `create_run` für den dauerhaften Lauf `"live"`, der jeden Prozess-Neustart überlebt, A-14). |
+| `replay.py` | **298** | 247 | Engine *und* CLI in einem Modul — so von Abschnitt 3.1 vorgegeben („`__main__` als CLI"). Gewachsen um `--strategie` (A-8c), Equity-Kurve, `finish_run`, `_iso_ms` (UTC). In A2 bewusst **nicht** angefasst (zwei Zeilen unter der harten Marke) — jede weitere Zeile hier braucht vorherige Rücksprache, nicht stillschweigendes Teilen. |
+| `ledger.py` | **236** | 200 | Gewachsen um die strenge `mark()` (wirft bei Position ohne Marktpreis) und `last_marks`, in A2/Aufgabe 5 um `restore(positions, cash)` (A-14: Kasse/Positionen aus dem Journal setzen statt über `apply()` zu erarbeiten, für den Start eines neuen Prozesses). Fast nur Docstring, der das *Warum* trägt. |
+| `web.py` | **218** | 188 | Bestand, von A2 bisher nicht berührt (Aufgabe 6 verdrahtet `poller.start()`). |
+| `execute.py` | **237** | 206 | Gewachsen um `reject_decision()` an sieben Stellen, `pending_ref_price` und `resolve_pending()`/`expire_stale_pending()` (E-010, Weg A: schwebende Vorschläge ohne Neubemessung aus dem Live-Poller auflösen, A2/Aufgabe 5). |
+| `db.py` | **228** | 201 | Gewachsen um Migration 3 samt Begründung im SQL-Kommentar. *A2, Aufgabe 5 (Fixrunde 1, kritischer Fund):* `connect()` öffnet jetzt mit `check_same_thread=False` samt Docstring-Begründung — ohne das schlägt jeder Datenbankzugriff aus dem Poller-Thread mit `sqlite3.ProgrammingError` fehl, von `run_forever()`s bewusst weitem `except Exception` unbemerkt in Backoff verwandelt (stiller Totalausfall der Kernfunktion von Aufgabe 5). |
+| `binance.py` | **280** | 235 *(A2, Aufgabe 3 + Fixrunde 1)* | Der einzige Netzzugang des Pakets bündelt jede Härtung an einer Stelle, weil es keine zweite gibt: fünf Ausnahmeklassen, ein eigener Redirect-Handler (A-17b), ein Host-/Schema-Wächter, der im Konstruktor **und** vor jeder Einzelanfrage läuft (A-17), defensive `Decimal`-Wandlung mit float/bool-Ablehnung (E-002, mit eigenem Kommentar, warum beide Prüfungen bleiben), drei Endpunkte (`server_time`, `klines`, `exchange_info`) samt Gewichtszähler (A-17c), ein nach oben gedeckelter `Retry-After` und ein Fangzweig für Netzfehler jenseits von `URLError` (`OSError`, `http.client.HTTPException` — Fixrunde 1, Befund 1). Rund ein Drittel der Zeilen sind Docstrings, die das Warum jeder Prüfung tragen. |
+| `config.py` | **243** | 200 *(neu in der Tabelle, A2, Aufgabe 5)* | Elf neue Felder für den Live-Betrieb (Spec 18: `market_data_enabled`, `market_interval`, `market_poll_s`, die vier Veraltet-/Uhrversatz-Schwellen, `fee_bps`, `slippage_bps`, `benchmark_symbol`, `candle_retention_days`), jedes mit eigenem, begründetem Leser (`_bool`, `_interval`, `_int_range`, `_benchmark_symbol`) statt einer generischen Parse-Funktion, weil jedes Feld eigene Grenzen und Fehlermeldungen braucht. |
+| `poller.py` | **274** | 235 *(neu in der Tabelle, A2, Aufgabe 5)* | Neues Modul: einziger Ort, an dem der Live-Thread läuft. Bündelt server_time-Cache (Spec 11.3, höchstens alle 15 min), Kerzen holen/speichern, Veraltet-Erkennung → Kill Switch (mit Übergangs-Logging, nicht Dauerspam), `resolve_pending()`-Aufruf, Equity-Schnappschuss, Backoff bei Fehlern und die Thread-Verwaltung (`run_forever`/`start`). Ein erheblicher Teil sind Docstrings, die *warum* `except Exception` statt `except BinanceError` steht (Fixrunde 1, Blocker: ein toter Poller ist schlimmer als ein fehlerhafter) und warum `poll_once()` über `pc.ctx.specs` statt `cfg.market_symbols` iteriert. |
 
 Zwei Beobachtungen, die zur Regel gehören: Ein erheblicher Teil des Wachstums sind **Docstrings
 und Kommentare**, die das *Warum* einer Korrektur tragen. Diese zu kürzen, um unter eine Zahl zu
@@ -202,9 +208,10 @@ verlangt aber eine Begründung, keine Kürzung.
 > geteilt: **Marktdaten** (`CandleRow`, `upsert_candles`, `get_candles`, `prune_candles`,
 > `upsert_symbol_spec`, `get_symbol_spec`) bleiben in `store.py` (**134 Zeilen**), alles
 > Laufbezogene (`runs`, `fills`, `positions`, `equity_curve`, die Lauf-Spalten von `decisions`)
-> wandert nach `store_run.py` (**208 Zeilen**, siehe Tabelle oben — über dem 200er-Richtwert,
-> unter der 300er-Marke). Beide liegen damit unter der harten Marke; `test_modulgroesse.py`
-> sichert das für das gesamte Verzeichnis zu, nicht nur für diese zwei Dateien.
+> wandert nach `store_run.py` (**224 Zeilen** nach Aufgabe 5, siehe Tabelle oben — über dem
+> 200er-Richtwert, unter der 300er-Marke). Beide liegen damit unter der harten Marke;
+> `test_modulgroesse.py` sichert das für das gesamte Verzeichnis zu, nicht nur für diese zwei
+> Dateien.
 
 ### 3.2 Geändert
 
