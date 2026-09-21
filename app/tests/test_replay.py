@@ -340,6 +340,7 @@ def test_final_equity_und_benchmark_von_hand_nachgerechnet():
                          benchmark_symbol="BTCUSDC", run_id="test-equity-handrechnung")
 
     assert len(result.fills) == 1  # nur der eine BUY der Strategie
+    assert result.benchmark_bought is True  # sonst waere 12100 nur das Startkapital
     assert result.final_equity == Decimal("11050")
     assert result.benchmark_final_equity == Decimal("12100")
 
@@ -489,3 +490,64 @@ def test_replay_schreibt_equity_kurve_und_schliesst_beide_laeufe_ab():
               for r in conn.execute("SELECT run_id, finished_at FROM runs").fetchall()}
     assert set(laeufe) == {"test-kurve", "bench-test-kurve"}
     assert all(wert is not None for wert in laeufe.values()), laeufe
+
+
+def test_benchmark_bought_meldet_den_nie_ausgefuehrten_kauf():
+    """Fix-Welle, Review-Befund 8: Schlaegt der Kauf an der Kassenmarge fehl,
+    bleibt `bought` False und equity() liefert unveraendert das Startkapital.
+    Jede Alpha-Zahl saehe dann glaenzend aus -- die Strategie "schlaegt" einen
+    Vergleich, der nie stattgefunden hat. benchmark_bought macht das sichtbar.
+
+    Aufbau: jede Kerze eroeffnet 5 % ueber dem Schluss der Vorgaengerkerze.
+    Die Kassenmarge von BuyAndHold ist 2*(fee_bps+slippage_bps)/100 = 0,3 %
+    und reicht dafuer an keiner einzigen Kerze."""
+    preise = [Decimal("100"), Decimal("105"), Decimal("110.25"), Decimal("115.7625")]
+    candles = [
+        Candle(symbol="BTCUSDC", interval="15m", open_time=i * 900_000,
+               close_time=i * 900_000 + 899_999, open=p, high=p, low=p, close=p,
+               volume=Decimal("1"), closed=True)
+        for i, p in enumerate(preise)
+    ]
+    result = run_replay(candles, _wait_fn, CFG, SPECS, fee_bps=10.0, slippage_bps=5.0,
+                         benchmark_symbol="BTCUSDC", run_id="test-bench-nie-gekauft")
+
+    assert result.benchmark_bought is False
+    # Genau die Falle: der Benchmark steht unveraendert auf dem Startkapital.
+    assert result.benchmark_final_equity == Decimal("10000")
+
+    # Gegenprobe: ohne Luecke zwischen Schluss- und Eroeffnungskurs kauft er.
+    flach = [
+        Candle(symbol="BTCUSDC", interval="15m", open_time=i * 900_000,
+               close_time=i * 900_000 + 899_999, open=Decimal("100"), high=Decimal("100"),
+               low=Decimal("100"), close=Decimal("100"), volume=Decimal("1"), closed=True)
+        for i in range(4)
+    ]
+    ok = run_replay(flach, _wait_fn, CFG, SPECS, fee_bps=10.0, slippage_bps=5.0,
+                     benchmark_symbol="BTCUSDC", run_id="test-bench-gekauft")
+    assert ok.benchmark_bought is True
+    assert ok.benchmark_final_equity < Decimal("10000")  # Gebuehr und Slippage kosten
+
+
+def test_cli_bericht_nennt_benchmark_gekauft(tmp_path):
+    """Der CLI-Bericht muss die Zahl mitliefern, sonst bliebe der nie
+    ausgefuehrte Benchmark-Kauf im Betrieb unsichtbar (Review-Befund 8)."""
+    candles = _candles(60)
+    conn = db.connect(tmp_path / "cli2.db")
+    db.migrate(conn)
+    store.upsert_candles(conn, [
+        store.CandleRow(symbol=c.symbol, interval=c.interval, open_time=c.open_time,
+                         close_time=c.close_time, open=c.open, high=c.high, low=c.low,
+                         close=c.close, volume=c.volume, source="fixture",
+                         fetched_at="2026-01-01T00:00:00Z")
+        for c in candles
+    ])
+    conn.close()
+    out = subprocess.run(
+        [sys.executable, "-m", "aitra.replay", "--symbol", "BTCUSDC", "--interval", "15m",
+         "--from", "1970-01-01T00:00:00+00:00", "--to", "1970-01-02T00:00:00+00:00",
+         "--db", str(tmp_path / "cli2.db"), "--strategie", "takt"],
+        cwd=str(Path(__file__).resolve().parent.parent), capture_output=True, text=True,
+        env={**os.environ, "DATA_DIR": str(tmp_path), "ADMIN_TOKEN": "x" * 32},
+    )
+    assert out.returncode == 0, out.stderr
+    assert "Benchmark-gekauft=ja" in out.stderr, out.stderr

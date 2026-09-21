@@ -36,6 +36,13 @@ class ReplayResult:
     fills: list[Fill]
     kill_switch_engagements: int
     decisions: int
+    benchmark_bought: bool
+    """Ob der Buy-&-Hold-Vergleich ueberhaupt gekauft hat.
+
+    Scheitert der Kauf an jeder Kerze an der Kassenmarge, bleibt der Benchmark
+    bei seinem Startkapital stehen. Jede Alpha-Zahl saehe dann glaenzend aus,
+    ohne dass irgendetwas verglichen worden waere. Deshalb steht das Ergebnis
+    hier und im CLI-Bericht, statt nur im Inneren von BuyAndHold."""
 
 
 def _utc_date(ms: int):
@@ -137,7 +144,8 @@ def run_replay(
         conn.close()
 
     return ReplayResult(run_id=run_id, final_equity=final_equity, benchmark_final_equity=bench_equity,
-                         fills=fills, kill_switch_engagements=kill_switch_engagements, decisions=decisions)
+                         fills=fills, kill_switch_engagements=kill_switch_engagements,
+                         decisions=decisions, benchmark_bought=bench.bought)
 
 
 def _load_candles_from_db(conn: sqlite3.Connection, symbol: str, interval: str,
@@ -233,6 +241,7 @@ def main(argv: list[str] | None = None) -> int:
     print(
         f"Kerzen={len(candles)} Entscheidungen={result.decisions} Fills={len(result.fills)} "
         f"Endkapital={result.final_equity} Benchmark={result.benchmark_final_equity} "
+        f"Benchmark-gekauft={'ja' if result.benchmark_bought else 'NEIN'} "
         f"Kill-Switch-Auslösungen={result.kill_switch_engagements}",
         file=sys.stderr,
     )
