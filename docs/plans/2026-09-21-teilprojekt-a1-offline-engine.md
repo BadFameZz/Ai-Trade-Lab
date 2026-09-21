@@ -31,7 +31,10 @@ Diese gelten für **jede** Aufgabe, ohne dass sie dort wiederholt werden:
 - **Python 3.12** — `app/Dockerfile:1` ist `python:3.12-slim`. Keine 3.13-Syntax.
 - **Bestandsstil:** `from __future__ import annotations` als erste Zeile, frozen dataclasses,
   deutschsprachige Docstrings, keine Klasse ohne Grund.
-- **Kein Modul über 200 Zeilen.**
+- **200 Zeilen je Modul sind ein Richtwert, ab 300 Zeilen wird geteilt.**
+  *(Fix-Welle A1: die frühere harte Grenze „kein Modul über 200 Zeilen" ist gescheitert —
+  sechs von zwölf Modulen überschreiten sie. Begründung je Modul und die neue Marke stehen
+  in der Spec, Abschnitt 3.1b.)*
 - **Geld ist niemals `float`.** Kein `float()` auf einem Geldwert, keine Geld-Literale ohne
   `Decimal`, keine Geldrechnung außerhalb des Kontexts aus `money.py`. Prozentsätze und
   Basispunkte dürfen `float` bleiben — sie sind keine Beträge.

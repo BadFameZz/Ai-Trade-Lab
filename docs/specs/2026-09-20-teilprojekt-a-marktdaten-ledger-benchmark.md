@@ -163,24 +163,47 @@ der Standardbibliothek und voneinander ab.
 | `benchmark.py` | 70 | `BuyAndHold` — eine zweite `Ledger`-Instanz, genau ein BUY, danach nur `mark()` | `ledger`, `money` |
 | `replay.py` | 120 | `run_replay(candles, decide_fn, ctx)` mit `SimClock` und lauf-lokalem Kill Switch (E-008); `__main__` als CLI | `marketdata`, `execute`, `benchmark` |
 | `poller.py` | 160 | Live-Betriebsart: Thread, Backoff, Kerzen persistieren, Veraltet-Erkennung → Kill Switch, schwebende Fills ausführen, Equity-Schnappschüsse | `binance`, `marketdata`, `execute`, `store` |
-| `store.py` | **289** *(geschätzt waren 190)* | Lese-/Schreibzugriff auf die neuen Tabellen. Geld nur über `money` in TEXT und zurück | `db`, `money` |
+| `store.py` | **324** *(geschätzt waren 190)* | Lese-/Schreibzugriff auf die neuen Tabellen. Geld nur über `money` in TEXT und zurück | `db`, `money` |
 | `backfill.py` | 70 | `python -m aitra.backfill --symbol … --interval … --days …`, im Container aufgerufen | `binance`, `store` |
 
-**Summe geschätzt: ~1.345 neue Zeilen** (Bestand 485 → ~1.850). Kein Modul über 200 Zeilen.
+**Summe geschätzt: ~1.345 neue Zeilen** (Bestand 485 → ~1.850).
 
-> **Nachtrag Fix-Welle A1 — gemessen statt geschätzt.** Die Schätzung für `store.py` war
-> falsch, nicht die Struktur: es sind **289 Zeilen** (244 nicht leer), 19 flache
-> CRUD-Funktionen über 6 Tabellen und genau die eine Verantwortung, die diese Tabelle dem
-> Modul zuschreibt. *Ruling (bereits gefällt, Aufgabe 3):* `store.py` bleibt ungeteilt —
-> Zweck der 200-Zeilen-Regel ist Fokus, nicht die Zahl; ein Aufteilen müsste eine Naht
-> erfinden, die der Entwurf nicht hat. *Kosten bei Irrtum:* wächst `store.py` in A2 um die
-> Poller-Zugriffe weiter, an der natürlichen Naht trennen (Marktdaten / Lauf+Ledger) —
-> umkehrbar in einem Commit.
->
-> **Offen, braucht ein eigenes Ruling:** Nach der Fix-Welle liegen auch
-> `replay.py` (**269**), `web.py` (**218**) und `ledger.py` (**227**) über 200 Zeilen.
-> Die Randbedingung „Kein Modul über 200 Zeilen" gilt damit für vier Module nicht mehr
-> und ist entweder anzupassen oder durch Aufteilen einzulösen.
+### 3.1b Die 200-Zeilen-Regel ist ein Richtwert, keine Grenze *(Ruling Fix-Welle A1)*
+
+Die ursprüngliche Randbedingung lautete „Kein Modul über 200 Zeilen". Sie ist **gescheitert**:
+nach der Fix-Welle überschreiten sie **sechs von zwölf** Modulen, jedes aus nachvollziehbarem
+Grund. Das wird hier festgehalten statt stillschweigend übergangen — am Ende umzubauen wäre
+schlechter als die Regel ehrlich zu korrigieren.
+
+**Neue Regel:**
+- **200 Zeilen sind ein Richtwert.** Wer ihn überschreitet, begründet es hier in der Tabelle.
+- **Ab 300 Zeilen wird geteilt.** Das ist die harte Marke.
+
+Gemessen am 2026-09-21 (`wc -l app/aitra/*.py`):
+
+| Modul | Zeilen | nicht leer | Warum über 200 |
+|---|---:|---:|---|
+| `store.py` | **324** | 270 | 19 flache CRUD-Funktionen über 6 Tabellen, genau eine Verantwortung. Gewachsen um `reject_decision()` (Ablehnungen im Journal) und `EquityPoint`/`append_equity_points()` (Sammelschreiben). **Über der 300er-Marke — siehe Konflikt unten.** |
+| `replay.py` | **283** | 233 | Engine *und* CLI in einem Modul — so von Abschnitt 3.1 vorgegeben („`__main__` als CLI"). Gewachsen um `--strategie` (A-8c), Equity-Kurve, `finish_run`, `_iso_ms` (UTC). |
+| `ledger.py` | **227** | 192 | Gewachsen um die strenge `mark()` (wirft bei Position ohne Marktpreis) und `last_marks`. Fast nur Docstring, der das *Warum* trägt. |
+| `web.py` | **218** | 188 | Bestand, von der Fix-Welle nicht berührt. |
+| `execute.py` | **204** | 178 | Gewachsen um `reject_decision()` an sieben Stellen und `pending_ref_price`. |
+| `db.py` | **201** | 175 | Gewachsen um Migration 3 samt Begründung im SQL-Kommentar. |
+
+Zwei Beobachtungen, die zur Regel gehören: Ein erheblicher Teil des Wachstums sind **Docstrings
+und Kommentare**, die das *Warum* einer Korrektur tragen. Diese zu kürzen, um unter eine Zahl zu
+kommen, wäre das Spiel mit der Kennzahl statt Entwurfsarbeit — deshalb zählt die Regel Zeilen,
+verlangt aber eine Begründung, keine Kürzung.
+
+> **Konflikt, offen für den Orchestrator:** `store.py` liegt mit **324 Zeilen** bereits über der
+> soeben gesetzten 300er-Marke. Damit stehen sich zwei Rulings gegenüber: das aus Aufgabe 3
+> („`store.py` bleibt ungeteilt — Zweck der Regel ist Fokus, nicht die Zahl") und die neue Marke.
+> In dieser Runde wurde **nicht geteilt**: unmittelbar vor Nachprüfung und Push eine
+> Modulaufteilung vorzunehmen, von der kein A1-Kriterium profitiert, legt das ganze Risiko auf
+> die Änderung. Die Naht ist bekannt und im Aufgabe-3-Ruling bereits benannt — **Marktdaten**
+> (`candles`, `symbol_specs`) gegen **Lauf und Ledger** (`runs`, `fills`, `positions`,
+> `equity_curve`, `decisions`). *Kosten bei Irrtum:* `store.py` wächst in A2 um die
+> Poller-Zugriffe weiter und wird unhandlich; die Trennung an dieser Naht ist ein Commit.
 
 ### 3.2 Geändert
 
