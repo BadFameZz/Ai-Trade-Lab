@@ -125,16 +125,20 @@ def main(argv: list[str] | None = None) -> int:
     client = BinanceClient(cfg.binance_base_url)
     symbol = args.symbol.upper()
     try:
-        result = backfill_symbol(client, conn, symbol, args.interval, args.days)
-    except BinanceError as e:
-        db.log_event(conn, "BACKFILL", "ERROR", "BACKFILL_FAILED",
-                     f"{symbol} {args.interval}: {type(e).__name__}")
+        try:
+            result = backfill_symbol(client, conn, symbol, args.interval, args.days)
+        except BinanceError as e:
+            db.log_event(conn, "BACKFILL", "ERROR", "BACKFILL_FAILED",
+                         f"{symbol} {args.interval}: {type(e).__name__}")
+            return 1
+        print(f"{result.symbol} {result.interval}: {result.fetched} Kerzen in {result.requests} "
+              f"Anfragen, {result.gaps} Luecken, Gewicht {result.weight_used}", file=sys.stderr)
+        return 0
+    finally:
+        # Auch bei sqlite3.Error oder KeyboardInterrupt (etwa waehrend sleep_fn im
+        # Ratenbudget) schliessen. Kein Datenrisiko - WAL ist fuer den Absturzfall
+        # gebaut -, aber der Prozess soll deterministisch aufraeumen.
         conn.close()
-        return 1
-    print(f"{result.symbol} {result.interval}: {result.fetched} Kerzen in {result.requests} "
-          f"Anfragen, {result.gaps} Luecken, Gewicht {result.weight_used}", file=sys.stderr)
-    conn.close()
-    return 0
 
 
 if __name__ == "__main__":

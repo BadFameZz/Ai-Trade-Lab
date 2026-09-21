@@ -273,6 +273,9 @@ def test_backfill_verwirft_laufende_kerze_ueber_den_binance_filter(tmp_path):
     rows = store.get_candles(conn, "BTCUSDC", "15m", limit=50)
     assert len(rows) == 5, "die laufende Kerze darf nicht in der DB landen"
     assert rows[-1].open_time == universum[4][0]
+    # Ohne diese Zusicherung bliebe ein Rueckschritt unbemerkt, der nach dem Filtern
+    # Leeranfragen nachschiebt, statt sauber zu terminieren (Nachreview Fixrunde 1).
+    assert result.requests == 2, f"zwei Anfragen erwartet, gemessen: {result.requests}"
 
 
 # --- Fixrunde 1 (Befund 3): main() faengt BinanceError ab, backfill_symbol() nicht ---
