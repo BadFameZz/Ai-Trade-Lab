@@ -22,7 +22,30 @@ from .risk import Proposal, RiskEngine
 
 
 class BuyAndHold:
-    """Kauft genau einmal, mit dem gesamten Startkapital, und haelt danach nur."""
+    """Kauft (fast) das gesamte Startkapital, und haelt danach nur noch.
+
+    Kassenmarge (Fix-Runde 1): ref_price MUSS prev_candle.close sein, niemals
+    candle.open/close/high/low — sonst kennt die Groessenbemessung den
+    tatsaechlichen Fuellpreis, bevor er feststeht (Blick in die Zukunft,
+    Verstoss gegen E-001/E-006; decide_fn darf t+1 nicht sehen). Bei
+    position_pct=100 bleibt dann aber keine Kassenmarge fuer die
+    Preisluecke zwischen der Entscheidungskerze (ref_price) und der
+    tatsaechlichen Fuellkerze (candle.open, E-006): gemessen (nicht geraten)
+    reicht ein Kursanstieg von nur 0,016 % zwischen den beiden Kerzen bereits,
+    um mit position_pct=100 in INSUFFICIENT_CASH zu laufen — bei exakt
+    gleichem Kurs (Luecke = 0) geht ein 100-%-Kauf dagegen glatt auf, siehe
+    Herleitung im Plan-Bericht. Da die Luecke zwischen zwei Kerzen im Voraus
+    nicht bekannt ist, reserviert BuyAndHold eine Marge, die sich an den
+    beiden einzigen hier bekannten Kostengroessen orientiert: fee_bps und
+    slippage_bps. _MARGIN_FACTOR=2 heisst: einmal deren Summe als Puffer fuer
+    die Preisluecke selbst, ein zweites Mal als zusaetzliche Luft, weil beide
+    Kerzen (Entscheidung und Fuellung) je eine eigene Slippage-Berechnung
+    durchlaufen. Reicht die Marge fuer eine konkrete Kerze trotzdem nicht,
+    bleibt `bought` False, und der naechste Aufruf von on_candle() versucht
+    es erneut (Buy & Hold ist eine Kerze Verzoegerung gleichgueltig).
+    """
+
+    _MARGIN_FACTOR = 2
 
     def __init__(
         self,
@@ -48,39 +71,37 @@ class BuyAndHold:
         )
         self._symbol = symbol
         self._bought = False
+        margin_pct = self._MARGIN_FACTOR * (fee_bps + slippage_bps) / 100.0
+        self._position_pct = max(1.0, 100.0 - margin_pct)
 
     @property
     def bought(self) -> bool:
-        """Ob der einmalige Kauf bereits ausgefuehrt wurde."""
+        """Ob der Kauf bereits ausgefuehrt wurde."""
         return self._bought
 
     def on_candle(self, candle: Candle, prev_candle: Candle | None) -> None:
-        """Kauft genau einmal, auf der zweiten Kerze des Laufs (Spec 7.1).
+        """Versucht den einmaligen Kauf, fruehestens auf der zweiten Kerze des Laufs.
 
         prev_candle is None heisst: erste Kerze des Laufs, es gibt noch keine
-        Folgekerze zum Fuellen. Jeder weitere Aufruf nach dem Kauf ist ein Noop.
+        Vorgaengerkerze fuer ref_price. ref_price ist immer prev_candle.close
+        (niemals ein Feld von candle) — die Groessenbemessung darf den
+        Fuellpreis der aktuellen Kerze nicht kennen (E-001/E-006). Schlaegt
+        der Kauf an einer Kerze fehl (Kassenmarge reicht nicht), bleibt
+        `bought` False, und der naechste Aufruf versucht es erneut.
         """
         if self._bought or prev_candle is None:
             return
-        # ref_price = candle.open (die Kerze, gegen die auch gefuellt wird, nicht
-        # prev_candle.close): bei position_pct=100 bleibt keine Kassenmarge fuer
-        # eine Preisdifferenz zwischen Entscheidungs- und Fuellpreis. Mit
-        # prev_candle.close als ref_price kollidiert das Sizing (das von diesem
-        # Preis ausgeht) mit dem tatsaechlichen Fuellpreis aus candle.open beim
-        # Fuellen und fuehrt bei steigendem Kurs zu INSUFFICIENT_CASH. candle
-        # liegt hier vollstaendig vor (geschlossene Kerze, kein Vorgriff auf die
-        # Zukunft) - der Benchmark kauft ohnehin sofort, ohne die
-        # Entscheidungsverzoegerung realer Strategien zu simulieren.
         equity_now = self._ctx.ledger.mark({}, ts_ms=prev_candle.close_time).equity
-        execute_proposal(
-            Proposal(symbol=self._symbol, action="BUY", position_pct=100),
+        result = execute_proposal(
+            Proposal(symbol=self._symbol, action="BUY", position_pct=self._position_pct),
             self._ctx,
-            marks={}, ts_ms=prev_candle.close_time, ref_price=candle.open,
+            marks={}, ts_ms=prev_candle.close_time, ref_price=prev_candle.close,
             start_of_day_equity=equity_now, next_candle=candle,
             strategy_version="benchmark-buy-and-hold",
             reason="BTC Buy & Hold Referenz (Spec 7.1)",
         )
-        self._bought = True
+        if result.status == "filled":
+            self._bought = True
 
     def equity(self, marks: Mapping[str, Decimal], ts_ms: int) -> Decimal:
         """Bewertet Kasse + Position zu den gegebenen Marktpreisen."""

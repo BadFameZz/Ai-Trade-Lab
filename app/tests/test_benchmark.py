@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 from decimal import Decimal
 from pathlib import Path
+from unittest.mock import patch
 
 from aitra import db, money, store
 from aitra.benchmark import BuyAndHold
@@ -60,6 +61,50 @@ def test_equity_folgt_dem_kurs_nach_dem_kauf(tmp_path):
     e_tief = bench.equity({"BTCUSDC": Decimal("70000")}, ts_ms=1_800_000)
     e_hoch = bench.equity({"BTCUSDC": Decimal("90000")}, ts_ms=1_800_000)
     assert e_hoch > e_tief
+
+
+def test_kauft_trotz_grosser_kursluecke_notfalls_eine_kerze_spaeter(tmp_path):
+    """Fix-Runde 1, Punkt 3+4: schlaegt der erste Versuch an der Kassenmarge
+    fehl (grosse Luecke zwischen Schlusskurs und Eroeffnung), bleibt `bought`
+    False und der naechste Aufruf versucht es erneut — Buy & Hold ist eine
+    Kerze Verzoegerung gleichgueltig."""
+    bench = _bench(tmp_path)
+    k0 = _candle(0, "81287.03")
+    k1 = _candle(900_000, "85351.38")  # +5 % Spruenge zwischen k0.close und k1.open
+    k2 = _candle(1_800_000, "85351.38")  # k2.open == k1.close: keine Luecke mehr
+
+    bench.on_candle(k0, prev_candle=None)
+    bench.on_candle(k1, prev_candle=k0)
+    assert bench.bought is False  # Marge reicht bei dieser Luecke nicht
+    assert store.get_fills(bench._ctx.conn, "bench-run-1") == []
+
+    bench.on_candle(k2, prev_candle=k1)
+    assert bench.bought is True
+    assert len(store.get_fills(bench._ctx.conn, "bench-run-1")) == 1
+
+
+def test_look_ahead_ref_price_ist_niemals_die_fuellkerze(tmp_path):
+    """Rot-Nachweis-Sicherung (Fix-Runde 1): ref_price darf nur aus
+    prev_candle stammen, nie aus candle (E-001/E-006) — genau das Muster
+    (ref_price=candle.open), das korrigiert wurde. k1 traegt bewusst einen
+    ganz anderen Preis als k0, damit eine Verwechslung sofort auffaellt."""
+    bench = _bench(tmp_path)
+    k0 = _candle(0, "81287.03")
+    k1 = _candle(900_000, "99999.00")
+    bench.on_candle(k0, prev_candle=None)
+
+    captured: dict = {}
+    from aitra.benchmark import execute_proposal as _real_execute_proposal
+
+    def spy(proposal, ctx, **kwargs):
+        captured["ref_price"] = kwargs["ref_price"]
+        return _real_execute_proposal(proposal, ctx, **kwargs)
+
+    with patch("aitra.benchmark.execute_proposal", side_effect=spy):
+        bench.on_candle(k1, prev_candle=k0)
+
+    assert captured["ref_price"] == k0.close
+    assert captured["ref_price"] != k1.open
 
 
 def test_kein_zweiter_aufrufer_von_apply_in_benchmark():
