@@ -290,3 +290,105 @@ def test_html_felder_sind_teilmenge_der_echten_endpunkt_antworten(client, app):
     assert any(r.get("pending_since_ms") is not None for r in entscheidungen), (
         "Fixture liefert keine schwebende Entscheidung - Test waere unscharf"
     )
+
+
+# --------------------------------------------------------------------------
+# V-2 / K-2 aus dem Gesamtreview A2
+# --------------------------------------------------------------------------
+
+def _live_db(tmp_path: Path):
+    conn = db.connect(tmp_path / "aitra.db")
+    db.migrate(conn)
+    store_run.ensure_run(conn, "live", "live", db.now(), "0.3.0")
+    store.upsert_candles(conn, [store.CandleRow(
+        symbol="BTCUSDC", interval="15m", open_time=0, close_time=899_999,
+        open=Decimal("81207.03"), high=Decimal("81207.03"), low=Decimal("81207.03"),
+        close=Decimal("81207.03"), volume=Decimal("1"), source="fixture",
+        fetched_at=db.now())])
+    return conn
+
+
+def test_v2_kasse_und_positionen_kommen_aus_einem_schnappschuss(tmp_path, monkeypatch):
+    """V-2 (Gesamtreview A2): Positionen kamen aus `positions`, die Kasse aus
+    `fills[-1].cash_after` - zwei SELECTs ohne umschliessende Transaktion.
+    Landet dazwischen ein Fill, sieht der Leser die verringerte Kasse OHNE die
+    dazugehoerige Position: ein Scheinverlust in voller Ordergroesse. Der
+    laeuft ueber to_portfolio_state() in daily_loss_pct() und kann einen
+    ECHTEN Kill Switch ausloesen.
+
+    Der Zwischenfall wird deterministisch erzeugt: die erste Lesefunktion
+    (get_positions) schreibt nach ihrer Rueckgabe ueber eine ZWEITE Verbindung
+    einen Fill samt Position - genau das, was der Poller-Thread nebenher tut."""
+    from aitra import dashboard, store_run as sr
+
+    cfg = Config(Decimal("10000"), 10, 2, 50, tmp_path, TOKEN)
+    conn = _live_db(tmp_path)
+    original = sr.get_positions
+    dazwischen = {"getan": False}
+
+    def get_positions_mit_schreiber(c, run_id):
+        ergebnis = original(c, run_id)
+        if not dazwischen["getan"]:
+            dazwischen["getan"] = True
+            zweite = db.connect(tmp_path / "aitra.db")
+            sr.insert_fill(zweite, run_id="live", decision_id=None, symbol="BTCUSDC", side="BUY",
+                            candle_open_time=0, price=Decimal("81207.03"), qty=Decimal("0.01"),
+                            gross_quote=Decimal("812.0703"), fee=Decimal("0.8097"),
+                            net_quote=Decimal("812.88"), cash_after=Decimal("9187.12"),
+                            fee_bps=10.0, slippage_bps=5.0, ts=db.now())
+            sr.upsert_position(zweite, run_id="live", symbol="BTCUSDC", qty=Decimal("0.01"),
+                                avg_price=Decimal("81207.03"), realized_pnl=Decimal("0"),
+                                updated_at=db.now())
+            zweite.close()
+        return ergebnis
+
+    monkeypatch.setattr(sr, "get_positions", get_positions_mit_schreiber)
+    s = dashboard.build_status(conn, cfg)
+
+    # Der Ledger, aus dem equity/cash stammen, muss beides aus DERSELBEN Sicht
+    # haben: verringerte Kasse nur zusammen mit der Position, die sie gekostet
+    # hat. (Die Positionsliste in der Antwort wird spaeter gelesen und war
+    # deshalb schon befuellt, waehrend der Ledger die Position noch nicht
+    # kannte - genau daran zerbrach eine erste, schwaechere Fassung dieser
+    # Zusicherung.)
+    kasse, equity = Decimal(s["cash"]), Decimal(s["equity"])
+    assert (kasse < cfg.starting_balance) == (equity > kasse), (
+        f"Kasse {kasse} und Position stammen aus verschiedenen Schnappschuessen: "
+        f"equity={equity}, positions={s['positions']}"
+    )
+    assert Decimal(s["daily_pnl"]) > Decimal("-1"), (
+        f"Scheinverlust: daily_pnl={s['daily_pnl']}, daily_loss_pct={s['daily_loss_pct']}"
+    )
+    conn.close()
+
+
+def test_k2_status_zeigt_market_data_status_und_alter(tmp_path):
+    """K-2: poller.py schreibt market_data_age_s, es gab keinen Leser im
+    Paket. /api/status hatte kein market_data-Objekt, und der Messbefehl aus
+    A-19a (jq '.market_data.age_s') lief ins Leere.
+
+    age_s ist KEINE Geldgroesse (Aufgabe 6, Geldform-Waechter) und geht als
+    JSON-Zahl raus, nicht als Zeichenkette."""
+    from aitra import dashboard
+
+    cfg = Config(Decimal("10000"), 10, 2, 50, tmp_path, TOKEN)
+    conn = _live_db(tmp_path)
+
+    s = dashboard.build_status(conn, cfg)
+    assert s["market_data"] == {"status": "not_configured", "age_s": None}, f"gemessen: {s['market_data']}"
+
+    db.set_state(conn, "market_data_status", "warn")
+    db.set_state(conn, "market_data_age_s", "1400.5")
+    s = dashboard.build_status(conn, cfg)
+    assert s["market_data"]["status"] == "warn"
+    assert s["market_data"]["age_s"] == 1400.5, f"gemessen: {s['market_data']['age_s']!r}"
+    assert isinstance(s["market_data"]["age_s"], float), (
+        f"age_s muss eine JSON-Zahl sein, gemessen: {type(s['market_data']['age_s']).__name__}"
+    )
+
+    # staleness() liefert bei fehlender Kerze data_age_s = inf. float('inf')
+    # waere im JSON 'Infinity' - kein gueltiges JSON. Muss null werden.
+    db.set_state(conn, "market_data_age_s", "inf")
+    s = dashboard.build_status(conn, cfg)
+    assert s["market_data"]["age_s"] is None, f"gemessen: {s['market_data']['age_s']!r}"
+    conn.close()

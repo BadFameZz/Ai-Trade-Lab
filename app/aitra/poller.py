@@ -21,7 +21,6 @@ from __future__ import annotations
 
 import logging
 import threading
-from dataclasses import dataclass, field
 from typing import Mapping
 
 from . import db, execute, money, store, store_run
@@ -30,53 +29,15 @@ from .binance import BinanceClient, BinanceError, BinanceRateLimited
 from .config import Config
 from .execute import ExecutionContext
 from .ledger import Ledger, Position
-from .marketdata import (Candle, Clock, Staleness, WallClock, interval_seconds,
-                          projizierte_serverzeit, staleness)
+from .marketdata import Candle, Clock, WallClock, projizierte_serverzeit
+from .pollstate import (PollerContext, PollOutcome, apply_staleness,  # noqa: F401
+                         check_staleness, tageswechsel)
 from .risk import RiskEngine
 
 log = logging.getLogger("aitra.poller")
 
 BACKOFF_STEPS_S = (60, 120, 240, 600)  # Spec 8.3, Deckel 600 s
 _TIME_CHECK_INTERVAL_MS = 900_000       # alle 15 min server_time() (Spec 11.3)
-
-
-def check_staleness(cfg: Config, clock: Clock, latest_close_time_ms: int | None,
-                     server_time_ms: int | None) -> Staleness:
-    """Duenner Wrapper um marketdata.staleness() mit den konfigurierten
-    Schwellen - eigene Funktion, damit A-11/A-11b/A-12 sie ohne Netz, ohne DB
-    und ohne Thread direkt aufrufen koennen (siehe test_marketdata.py, A1)."""
-    return staleness(
-        clock, latest_close_time_ms, server_time_ms, interval_seconds(cfg.market_interval),
-        warn_s=cfg.market_stale_warn_s, kill_s=cfg.market_stale_kill_s,
-        clock_skew_warn_s=cfg.market_clock_skew_warn_s,
-        clock_skew_kill_s=cfg.market_clock_skew_kill_s,
-    )
-
-
-@dataclass
-class PollerContext:
-    """Aller veraenderliche Zustand eines Live-Poller-Laufs, testbar ohne Thread."""
-    conn: object
-    cfg: Config
-    client: BinanceClient
-    clock: Clock
-    ctx: ExecutionContext          # run_id == "live"
-    bench: BuyAndHold | None
-    last_close_time: dict = field(default_factory=dict)
-    last_candle: dict = field(default_factory=dict)
-    last_server_time_ms: int | None = None
-    last_time_check_ms: int | None = None
-    consecutive_failures: int = 0
-    was_stale: bool = False
-    last_lagging_event_ms: int | None = None
-
-
-@dataclass(frozen=True)
-class PollOutcome:
-    ok: bool
-    staleness: Staleness | None
-    fills: list
-    backoff_s: float
 
 
 def _to_row(k: Candle, source: str = "binance") -> store.CandleRow:
@@ -92,28 +53,6 @@ def _backoff(consecutive_failures: int) -> float:
     return float(BACKOFF_STEPS_S[idx])
 
 
-def _apply_staleness(pc: PollerContext, st: Staleness) -> None:
-    """Setzt den Kill Switch bei 'stale' und loggt NUR beim Uebergang - sonst
-    spammt jeder weitere Poll dasselbe Ereignis, solange der Zustand anhaelt
-    (Spec 8.2: MARKET_DATA_LAGGING hoechstens einmal pro 15 min)."""
-    db.set_state(pc.conn, "market_data_status", st.status)
-    db.set_state(pc.conn, "market_data_age_s", str(st.data_age_s))
-    if st.status == "stale":
-        if not pc.was_stale:
-            db.set_state(pc.conn, "kill_switch", "1")
-            db.log_event(pc.conn, "POLLER", "WARN", "MARKET_DATA_STALE",
-                         f"Datenalter {st.data_age_s:.0f}s, Uhrversatz {st.clock_skew_s:.0f}s")
-        pc.was_stale = True
-    else:
-        pc.was_stale = False
-        if st.status == "warn":
-            now = pc.clock.now_ms()
-            if pc.last_lagging_event_ms is None or now - pc.last_lagging_event_ms >= 900_000:
-                db.log_event(pc.conn, "POLLER", "WARN", "MARKET_DATA_LAGGING",
-                             f"Datenalter {st.data_age_s:.0f}s")
-                pc.last_lagging_event_ms = now
-
-
 def poll_once(pc: PollerContext) -> PollOutcome:
     """Ein Poll-Zyklus. Wirft nie wegen eines Netzfehlers: jede binance.py-
     Ausnahme wird gefangen, protokolliert, und fuehrt zu Backoff (Spec 8.3).
@@ -124,22 +63,32 @@ def poll_once(pc: PollerContext) -> PollOutcome:
 
     need_time = (pc.last_time_check_ms is None
                  or pc.clock.now_ms() - pc.last_time_check_ms >= _TIME_CHECK_INTERVAL_MS)
+    zeit_fehlgeschlagen = False
     if need_time:
         try:
             pc.last_server_time_ms = pc.client.server_time()
             pc.last_time_check_ms = pc.clock.now_ms()
         except BinanceError as e:
             db.log_event(pc.conn, "POLLER", "WARN", "MARKET_DATA_FETCH_FAILED", type(e).__name__)
-            pc.consecutive_failures += 1
-            return PollOutcome(ok=False, staleness=None, fills=[],
-                                backoff_s=_backoff(pc.consecutive_failures))
+            # V-4 (Gesamtreview A2): hier stand ein `return` VOR
+            # apply_staleness(). Nach einem Neustart ist last_time_check_ms
+            # None, also versuchte jeder Zyklus die Abfrage und kehrte frueh
+            # zurueck - gemessen: nach 5 Stunden ohne eine einzige Kerze
+            # meldete /api/health HTTP 200, "healthy", market_data: ok, Kill
+            # Switch aus. Dieselbe Klasse, die Fixrunde 1 fuer
+            # POLL_CYCLE_EXCEPTION geschlossen hat. Jetzt wird
+            # weitergelaufen; staleness() behandelt server_time_ms=None
+            # sauber (data_age_s = inf -> stale).
+            zeit_fehlgeschlagen = True
     # B-1: NIE der rohe Cache-Wert (siehe marketdata.projizierte_serverzeit).
     server_time_ms = projizierte_serverzeit(pc.clock, pc.last_server_time_ms,
                                              pc.last_time_check_ms)
 
     neue_kerzen: dict[str, Candle] = {}
-    fehlgeschlagen = False
-    for symbol in pc.ctx.specs:
+    fehlgeschlagen = zeit_fehlgeschlagen or server_time_ms is None
+    # Ohne Serverzeit keine klines: BinanceClient verwirft die laufende Kerze
+    # ueber close_time >= server_time_ms und braucht dafuer eine Zahl (Spec 8.1).
+    for symbol in (pc.ctx.specs if server_time_ms is not None else ()):
         try:
             kerzen = pc.client.klines(symbol, pc.cfg.market_interval,
                                        server_time_ms=server_time_ms, limit=2)
@@ -156,29 +105,44 @@ def poll_once(pc: PollerContext) -> PollOutcome:
         if kerzen:
             store.upsert_candles(pc.conn, [_to_row(k) for k in kerzen])
             neueste = kerzen[-1]
+            # V-6 (Gesamtreview A2): nur WIRKLICH neue Kerzen. klines(limit=2)
+            # gibt jeden Zyklus dieselbe geschlossene Kerze zurueck; "neu" war
+            # damit jede Antwort, und es entstand ein Equity-Punkt je Poll
+            # statt je Kerze (gemessen: 14 Punkte bei 1 Kerze in 15 min,
+            # hochgerechnet 525.600 statt 35.040 im Jahr).
+            if pc.last_close_time.get(symbol) != neueste.close_time:
+                neue_kerzen[symbol] = neueste
             pc.last_close_time[symbol] = neueste.close_time
-            neue_kerzen[symbol] = neueste
     pc.consecutive_failures = pc.consecutive_failures + 1 if fehlgeschlagen else 0
 
     latest_close = min(pc.last_close_time.values()) if pc.last_close_time else None
     st = check_staleness(pc.cfg, pc.clock, latest_close, server_time_ms)
-    _apply_staleness(pc, st)
+    apply_staleness(pc, st)
     # B-3 (Blocker, Gesamtreview A2): das Flag oben stammt vom ANFANG des
-    # Zyklus. _apply_staleness() hat den Kill Switch gerade eben in der
+    # Zyklus. apply_staleness() hat den Kill Switch gerade eben in der
     # Datenbank setzen koennen; ohne dieses erneute Lesen buchte
     # resolve_pending() unmittelbar danach gegen das veraltete Flag im
     # Speicher - gemessen: 798,64 USDC auf einer Kerze, die der Poller in
     # derselben Zeile als veraltet erkannt hatte.
     pc.ctx.kill_switch = db.get_state(pc.conn, "kill_switch", "0") == "1"
 
+    # E-006: der Verfall lief bisher nur als Nebenwirkung von
+    # resolve_pending(), das wegen der Dauer-"neuen" Kerze jeden Zyklus
+    # aufgerufen wurde. Seit V-6 kann neue_kerzen leer bleiben - der Verfall
+    # braucht deshalb einen eigenen, unbedingten Aufruf je Zyklus.
+    execute.expire_stale_pending(pc.ctx)
     fills = []
     for symbol, candle in neue_kerzen.items():
         fills.extend(execute.resolve_pending(pc.ctx, candle))
 
     if neue_kerzen:
         marks = {**pc.ctx.ledger.last_marks, **{s: c.close for s, c in neue_kerzen.items()}}
-        ts_ms = pc.clock.now_ms()
+        # V-6: die close_time der Kerze, nicht die Wanduhr - damit traegt der
+        # Punkt die Zeit, zu der er gilt, und der Primaerschluessel
+        # (run_id, ts_ms) schuetzt gegen Doppelschreibung.
+        ts_ms = max(c.close_time for c in neue_kerzen.values())
         v = pc.ctx.ledger.mark(marks, ts_ms=ts_ms)
+        tageswechsel(pc, ts_ms, v.equity)  # V-1, Spec 9.1/E-008
         bench_equity = None
         if pc.bench is not None:
             # Nur die eigene Kerze des Benchmark-Symbols speisen (siehe
@@ -196,6 +160,14 @@ def poll_once(pc: PollerContext) -> PollOutcome:
             run_id="live", ts_ms=ts_ms, equity=v.equity, cash=v.cash,
             benchmark_equity=bench_equity, exposure_pct=v.exposure_pct,
         )])
+        # V-7: A-16 ist laut Spec "der Waechter, der im Alltag arbeitet" -
+        # prune_candles() hatte im Produktivcode bis hierher genau einen
+        # Treffer: seine eigene Definition. Ohne diesen Aufruf ist
+        # CANDLE_RETENTION_DAYS ein Bedienelement ohne Wirkung und der
+        # Plattenverbrauch unbeschraenkt.
+        for symbol in neue_kerzen:
+            store.prune_candles(pc.conn, symbol, pc.cfg.market_interval,
+                                 pc.cfg.candle_retention_days)
 
     return PollOutcome(ok=not fehlgeschlagen, staleness=st, fills=fills,
                         backoff_s=_backoff(pc.consecutive_failures) if fehlgeschlagen else 0.0)

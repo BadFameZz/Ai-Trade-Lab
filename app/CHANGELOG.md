@@ -1,5 +1,28 @@
 # Changelog
 
+## Unveröffentlicht – Gesamt-Fixrunde Teilprojekt A2
+
+**Drei Blocker (ohne diese Runde ist der Lieferzustand nicht betriebsfähig):**
+- Der Poller schaltete sich im Auslieferungszustand nach 60 s selbst ab: der
+  zwischengespeicherte `server_time()`-Wert ging gegen die aktuelle Uhr in die
+  Veraltet-Erkennung, der gemeldete Uhrversatz wuchs um eine Sekunde pro Sekunde und
+  setzte den Kill Switch dauerhaft (B-1)
+- Der Livepfad füllte schwebende Vorschläge auf einer Kerze, die **vor** der
+  Entscheidung geöffnet hatte — zu einem Preis, den die Strategie beim Entscheiden
+  schon kannte (E-006, B-2)
+- Kill Switch fiel, und im selben Zyklus wurde trotzdem gebucht (B-3)
+
+**Vor Echtgeld:**
+- Tagesverlustgrenze ist wieder eine Tagesgrenze: `sod_equity`/`sod_date` werden am
+  UTC-Tageswechsel gesetzt, nach derselben Regel wie im Zeitraffer (V-1, Spec 9.1/E-008)
+- Kasse und Positionen des Dashboards kommen aus einem Schnappschuss (V-2)
+- Der Kill Switch bewaffnet sich nach manuellem Release neu, solange die Störung
+  anhält (V-3)
+- Neustart im Netzausfall meldet `stale` statt `ok` (V-4)
+- `CANDLE_RETENTION_DAYS` wirkt jetzt tatsächlich (V-7, A-16)
+- Ein Equity-Punkt je Kerze statt je Poll (V-6)
+- `/api/status` zeigt `market_data.{status, age_s}` (K-2)
+
 ## 0.3.0 – 2026-09-21
 - Marktdaten: öffentliche, nur lesende Binance-Spot-Endpunkte (`api.binance.com`),
   Kerzen für BTCUSDC und BNBUSDC im 15m-Intervall, alle 60 s abgerufen

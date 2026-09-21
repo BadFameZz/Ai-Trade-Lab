@@ -696,3 +696,236 @@ def test_b3_kill_switch_loest_aus_und_im_selben_zyklus_wird_nicht_mehr_gebucht(t
     row = conn.execute("SELECT risk_code FROM decisions WHERE id=?",
                         (pending.decision_id,)).fetchone()
     assert row["risk_code"] == "KILL_SWITCH", f"gemessen: {row['risk_code']!r}"
+
+
+# --------------------------------------------------------------------------
+# V-Punkte aus dem Gesamtreview A2 (vor Echtgeld)
+# --------------------------------------------------------------------------
+
+def _ms(iso: str) -> int:
+    """UTC-ISO -> Epochen-Millisekunden, damit Tagesgrenzen im Test lesbar sind."""
+    return int(datetime.fromisoformat(iso).replace(tzinfo=timezone.utc).timestamp() * 1000)
+
+
+def test_v1_tageswechsel_setzt_sod_equity_und_sod_date(tmp_path):
+    """V-1: die Tagesverlustgrenze war eine Grenze SEIT INBETRIEBNAHME.
+
+    sod_equity wurde nirgends im Paket geschrieben, nur mit Vorgabe
+    starting_balance gelesen (dashboard.py, web.py). Spec 9.1 verlangt:
+    Tageswechsel (UTC) -> state.sod_equity := equity, state.sod_date := heute.
+    replay.py macht es richtig (E-008), live lief auseinander - obwohl Spec 9.2
+    identisches Verhalten zusagt. Folge: faellt die Equity EINMAL 2 % unter
+    das Startkapital, lehnt die Engine dauerhaft jeden Kauf ab und
+    /api/risk/check setzt zusaetzlich den Kill Switch. Kein Tagesreset."""
+    # 23:30-Kerze schliesst 23:44:59.999, ist um 23:50 also wirklich zu.
+    # (Erster Entwurf nahm die 23:45-Kerze - die schliesst erst 23:59:59.999
+    # und wird von klines() korrekt als laufende Kerze verworfen; gemessen:
+    # sod_date blieb None, weil nie eine Kerze ankam.)
+    tag1_kerze = _ms("2026-01-01T23:30:00")
+    tag2_kerze = _ms("2026-01-02T00:00:00")
+    clock = SimClock(_ms("2026-01-01T23:50:00"))
+    kerzen = {"BTCUSDC": [_kerze(tag1_kerze, 900)]}
+
+    def klines(url):
+        return FakeAntwort(_body(kerzen["BTCUSDC"]))
+
+    def zeit(url):
+        return FakeAntwort(_body({"serverTime": clock.now_ms()}))
+
+    client = BinanceClient(BASIS, opener=FakeOpener({"/api/v3/klines": klines, "/api/v3/time": zeit}))
+    conn = db.connect(tmp_path / "a.db")
+    db.migrate(conn)
+    pc = poller.build_context(conn, _cfg(tmp_path), SPECS, clock=clock, client=client)
+
+    assert db.get_state(conn, "sod_date") is None, "Pruefflaeche: noch kein Tag gesetzt"
+    poller.poll_once(pc)
+    assert db.get_state(conn, "sod_date") == "2026-01-01", (
+        f"gemessen: {db.get_state(conn, 'sod_date')!r}"
+    )
+    sod_tag1 = db.get_state(conn, "sod_equity")
+    assert sod_tag1 == money.to_text(Decimal("10000")), f"gemessen: {sod_tag1!r}"
+
+    # Verlust erzeugen, damit der Tagesreset einen SICHTBAREN Unterschied macht
+    pc.ctx.ledger.restore({}, Decimal("9000"))
+    clock.set(_ms("2026-01-02T00:20:00"))
+    kerzen["BTCUSDC"] = [_kerze(tag2_kerze, 900)]
+    poller.poll_once(pc)
+
+    assert db.get_state(conn, "sod_date") == "2026-01-02", (
+        f"gemessen: {db.get_state(conn, 'sod_date')!r}"
+    )
+    assert db.get_state(conn, "sod_equity") == money.to_text(Decimal("9000")), (
+        f"sod_equity nach Tageswechsel gemessen: {db.get_state(conn, 'sod_equity')!r}"
+    )
+
+
+def test_v1_poller_und_replay_benutzen_dieselbe_tagesregel(tmp_path):
+    """V-1, zweite Haelfte des Auftrags: 'dieselbe Regel, nicht eine zweite
+    Auslegung davon'. Keine Kopie von _utc_date() - poller.py benutzt
+    buchstaeblich dieselbe Funktion wie replay.py. Ein spaeteres
+    'ich schreib das hier schnell selbst' faellt hier auf."""
+    from aitra import pollstate, replay
+
+    assert pollstate.utc_tag is replay._utc_date, (
+        "pollstate.py hat eine eigene Tagesregel bekommen statt der aus replay.py"
+    )
+
+
+def test_v3_kill_switch_bewaffnet_sich_nach_manuellem_release_neu(tmp_path):
+    """V-3: db.set_state(kill_switch,'1') lief nur `if not pc.was_stale`.
+    Gibt der Nutzer frei, waehrend die Daten weiter veraltet sind, setzte der
+    Poller ihn NIE wieder. Entscheidung des Koordinators: die Sicherung wird
+    bei JEDEM Zyklus gesetzt, solange der Zustand 'stale' ist - gedrosselt
+    wird nur das Ereignis, nicht die Sicherung."""
+    clock = SimClock(10_000_000)
+    kerzen = {"BTCUSDC": [_kerze(clock.now_ms() - 3_000_000 - 900_000, 900)]}  # 3000s > kill_eff
+    client = _client_mit_dynamischer_serverzeit(kerzen, clock)
+    conn = db.connect(tmp_path / "a.db")
+    db.migrate(conn)
+    pc = poller.build_context(conn, _cfg(tmp_path), SPECS, clock=clock, client=client)
+
+    assert poller.poll_once(pc).staleness.status == "stale"
+    assert db.get_state(conn, "kill_switch", "0") == "1"
+
+    db.set_state(conn, "kill_switch", "0")  # manuelles Release durch den Nutzer
+    clock.set(clock.now_ms() + 60_000)      # Stoerung haelt an
+    outcome = poller.poll_once(pc)
+
+    assert outcome.staleness.status == "stale", f"Pruefflaeche: {outcome.staleness}"
+    assert db.get_state(conn, "kill_switch", "0") == "1", (
+        "Kill Switch nach manuellem Release bei anhaltender Stoerung nicht neu gesetzt"
+    )
+    anzahl = conn.execute(
+        "SELECT COUNT(*) c FROM events WHERE event='MARKET_DATA_STALE'"
+    ).fetchone()["c"]
+    assert anzahl == 1, f"nur das EREIGNIS wird gedrosselt, gemessen: {anzahl}"
+
+
+def test_v4_neustart_im_netzausfall_meldet_stale_statt_ok(tmp_path):
+    """V-4: schlug server_time() fehl, kehrte poll_once() VOR
+    _apply_staleness() zurueck. Nach einem Neustart ist last_time_check_ms
+    None, also versuchte jeder Zyklus die Abfrage und kehrte frueh zurueck.
+    Gemessen: nach 5 Stunden ohne eine einzige Kerze meldete /api/health
+    HTTP 200, 'healthy', market_data: ok, Kill Switch aus. Zwei Wahrheiten,
+    und die sichtbare war die falsche."""
+    clock = SimClock(10_000_000)
+
+    def defekt(url):
+        raise OSError("Testdouble: kein Netz")
+
+    client = BinanceClient(BASIS, opener=FakeOpener({"/api/v3/klines": defekt,
+                                                      "/api/v3/time": defekt}))
+    conn = db.connect(tmp_path / "a.db")
+    db.migrate(conn)
+    db.set_state(conn, "market_data_status", "ok")  # Stand vor dem Neustart
+    pc = poller.build_context(conn, _cfg(tmp_path), SPECS, clock=clock, client=client)
+
+    for stunde in range(5):
+        outcome = poller.poll_once(pc)
+        clock.set(clock.now_ms() + 3_600_000)
+        assert outcome.staleness is not None, (
+            f"Stunde {stunde}: poll_once() kehrte ohne Veraltet-Auswertung zurueck"
+        )
+        assert outcome.staleness.status == "stale", f"Stunde {stunde}: {outcome.staleness}"
+
+    assert db.get_state(conn, "market_data_status") == "stale", (
+        f"gemessen: {db.get_state(conn, 'market_data_status')!r}"
+    )
+    assert db.get_state(conn, "kill_switch", "0") == "1", "Kill Switch muss fallen"
+
+
+def test_v6_ein_equity_punkt_je_kerze_nicht_je_poll(tmp_path):
+    """V-6: neue_kerzen war bei jedem Zyklus gefuellt, weil klines(limit=2)
+    dieselbe geschlossene Kerze zurueckgibt. Gemessen: 14 Equity-Punkte bei
+    1 Kerze in 15 min; hochgerechnet 525.600 statt 35.040 im Jahr.
+    ts_ms haengt jetzt an candle.close_time, nicht an der Wanduhr - damit
+    greift auch der Primaerschluessel (run_id, ts_ms)."""
+    kerze_open = 90_000_000
+    clock = SimClock(kerze_open + 900_000 + 60_000)
+    kerzen = {"BTCUSDC": [_kerze(kerze_open, 900)]}
+
+    def klines(url):
+        return FakeAntwort(_body(kerzen["BTCUSDC"]))
+
+    def zeit(url):
+        return FakeAntwort(_body({"serverTime": clock.now_ms()}))
+
+    client = BinanceClient(BASIS, opener=FakeOpener({"/api/v3/klines": klines, "/api/v3/time": zeit}))
+    conn = db.connect(tmp_path / "a.db")
+    db.migrate(conn)
+    pc = poller.build_context(conn, _cfg(tmp_path), SPECS, clock=clock, client=client)
+
+    for _ in range(14):  # 14 Polls in 15 min bei MARKET_POLL_S=60
+        poller.poll_once(pc)
+        clock.set(clock.now_ms() + 60_000)
+
+    punkte = store_run.get_equity_curve(conn, "live", limit=1000)
+    assert len(punkte) == 1, f"1 Kerze, erwartet 1 Equity-Punkt, gemessen: {len(punkte)}"
+    assert punkte[0]["ts_ms"] == kerze_open + 899_999, (
+        f"ts_ms muss die close_time der Kerze sein, gemessen: {punkte[0]['ts_ms']}"
+    )
+
+    kerzen["BTCUSDC"] = [_kerze(kerze_open + 900_000, 900)]
+    poller.poll_once(pc)
+    punkte = store_run.get_equity_curve(conn, "live", limit=1000)
+    assert len(punkte) == 2, f"nach der zweiten Kerze erwartet 2 Punkte, gemessen: {len(punkte)}"
+
+
+def test_v6_schwebende_vorschlaege_verfallen_auch_ohne_neue_kerze(tmp_path):
+    """Gegenprobe zu V-6: expire_stale_pending() lief bisher nur als
+    Nebenwirkung von resolve_pending(), das wegen der Dauer-'neuen' Kerze in
+    jedem Zyklus aufgerufen wurde. Wird nur noch bei echten neuen Kerzen
+    aufgeloest, muss der Verfall (E-006) einen eigenen Aufruf bekommen -
+    sonst schwebte ein Vorschlag bei ausbleibenden Kerzen ewig."""
+    from aitra.execute import execute_proposal
+    from aitra.risk import Proposal
+
+    kerze_open = 90_000_000
+    clock = SimClock(kerze_open + 900_000 + 60_000)
+    client = _client_fuer({"BTCUSDC": [_kerze(kerze_open, 900)]}, clock.now_ms())
+    conn = db.connect(tmp_path / "a.db")
+    db.migrate(conn)
+    pc = poller.build_context(conn, _cfg(tmp_path), SPECS, clock=clock, client=client)
+
+    poller.poll_once(pc)  # Kerze uebernehmen
+    pending = execute_proposal(
+        Proposal("BTCUSDC", "BUY", 8), pc.ctx, marks={}, ts_ms=clock.now_ms(),
+        ref_price=Decimal("81287.03"), start_of_day_equity=Decimal("10000"), next_candle=None,
+    )
+    assert pending.status == "pending_fill", f"Pruefflaeche: {pending}"
+
+    clock.set(clock.now_ms() + 1_800_001)  # ueber pending_expiry_ms, KEINE neue Kerze
+    poller.poll_once(pc)
+    row = conn.execute("SELECT pending_since_ms, risk_code FROM decisions WHERE id=?",
+                        (pending.decision_id,)).fetchone()
+    assert row["pending_since_ms"] is None, (
+        f"Vorschlag schwebt nach Ablauf weiter (risk_code={row['risk_code']!r})"
+    )
+
+
+def test_v7_candle_retention_days_wirkt_im_livepfad(tmp_path):
+    """V-7: prune_candles() hatte im Produktivcode genau EINEN Treffer -
+    seine eigene Definition. Die Spec nennt A-16 'den Waechter, der im Alltag
+    arbeitet'; der Unit-Test war gruen, der Weg zum Nutzer existierte nicht.
+    Das ist auch die Ursache des unbeschraenkten Plattenverbrauchs."""
+    neu_open = 90_000_000 + 40 * 86_400_000
+    alt_open = 90_000_000
+    clock = SimClock(neu_open + 900_000 + 60_000)
+    client = _client_fuer({"BTCUSDC": [_kerze(neu_open, 900)]}, clock.now_ms())
+    conn = db.connect(tmp_path / "a.db")
+    db.migrate(conn)
+    store.upsert_candles(conn, [store.CandleRow(
+        symbol="BTCUSDC", interval="15m", open_time=alt_open, close_time=alt_open + 899_999,
+        open=Decimal("1"), high=Decimal("1"), low=Decimal("1"), close=Decimal("1"),
+        volume=Decimal("1"), source="fixture", fetched_at=db.now())])
+    assert len(store.get_candles(conn, "BTCUSDC", "15m", limit=10)) == 1, "Pruefflaeche"
+
+    cfg = _cfg(tmp_path, candle_retention_days=7)
+    pc = poller.build_context(conn, cfg, SPECS, clock=clock, client=client)
+    poller.poll_once(pc)
+
+    uebrig = [r.open_time for r in store.get_candles(conn, "BTCUSDC", "15m", limit=10)]
+    assert uebrig == [neu_open], (
+        f"CANDLE_RETENTION_DAYS=7 haette die 40 Tage aeltere Kerze loeschen muessen, "
+        f"gemessen: {uebrig}"
+    )
