@@ -190,9 +190,10 @@ class Ledger:
             )
 
     def to_portfolio_state(self, v: Valuation, start_of_day_equity: Decimal) -> risk.PortfolioState:
-        """Baut den PortfolioState fuer die Risiko-Engine. Zwischenstand vor Aufgabe 7:
-        risk.PortfolioState kennt position_pct_by_symbol noch nicht; Aufgabe 7
-        erweitert diesen Aufruf um genau dieses Feld."""
+        """Baut den PortfolioState fuer die Risiko-Engine."""
         return risk.PortfolioState(
-            equity=v.equity, start_of_day_equity=start_of_day_equity, exposure_pct=v.exposure_pct,
+            equity=v.equity,
+            start_of_day_equity=start_of_day_equity,
+            exposure_pct=v.exposure_pct,
+            position_pct_by_symbol=v.position_pct_by_symbol,
         )

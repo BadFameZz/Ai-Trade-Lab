@@ -217,3 +217,12 @@ def test_buchhaltung_identitaet_a1():
 def test_a8b_keine_versteckte_uhr_kein_versteckter_zufall():
     text = Path(__file__).resolve().parent.parent.joinpath("aitra", "ledger.py").read_text()
     assert re.search(r"time\.time|datetime\.(now|utcnow)|random\.", text) is None
+
+
+def test_to_portfolio_state_gibt_position_pct_by_symbol_weiter():
+    ledger = _ledger()
+    ledger.apply(Order("BTCUSDC", "BUY", Decimal("0.05")), _candle("81287.03"))
+    v = ledger.mark({"BTCUSDC": Decimal("82000")}, ts_ms=1_800_000)
+    pf = ledger.to_portfolio_state(v, start_of_day_equity=Decimal("10000"))
+    assert pf.position_pct_by_symbol == v.position_pct_by_symbol
+    assert pf.position_pct_by_symbol["BTCUSDC"] > 0
