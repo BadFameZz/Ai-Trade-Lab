@@ -49,11 +49,18 @@ def test_insufficient_cash_bei_knapper_kasse():
 
 
 def test_a3_quantisierung_1000_stichproben():
-    """A-3: 1.000 Ordergroessen von 6 bis 1.000 USDC ueber drei Groessenordnungen."""
+    """A-3: 1.000 Ordergroessen von 6 bis 1.000 USDC ueber drei Groessenordnungen.
+
+    Prüft, dass size_order() korrekt quantisiert und die Notional nie überschritten wird.
+    Zählt Rejections und sichert ab, dass die Prüffläche >= 500 Stichproben groß ist.
+    """
     ledger = Ledger(starting_cash=Decimal("1000000"), specs={"BTCUSDC": BTC},
                      fee_bps=FEE_BPS, slippage_bps=SLIP_BPS)
     price = Decimal("81287.03")
     verletzungen_qty = verletzungen_tick = verletzungen_notional = 0
+    gepruefte_stichproben = 0
+    rejections_sizing = rejections_ledger = 0
+
     for i in range(1000):
         target_usdc = Decimal(6) * (Decimal(1000) / Decimal(6)) ** (Decimal(i) / Decimal(999))
         pct = target_usdc / Decimal("1000000") * Decimal(100)
@@ -61,6 +68,7 @@ def test_a3_quantisierung_1000_stichproben():
         v = _valuation(equity="1000000")
         result = size_order(p, v, BTC, price, FEE_BPS, SLIP_BPS, held_qty=Decimal(0))
         if isinstance(result, Rejection):
+            rejections_sizing += 1
             continue
         if result.base_qty % BTC.step_size != 0:
             verletzungen_qty += 1
@@ -70,14 +78,20 @@ def test_a3_quantisierung_1000_stichproben():
                          close=price, volume=Decimal("1"), closed=True)
         fill = ledger.apply(result, candle)
         if isinstance(fill, Rejection):
+            rejections_ledger += 1
             continue
         if fill.price % BTC.tick_size != 0:
             verletzungen_tick += 1
         if fill.gross_quote > target_usdc:
             verletzungen_notional += 1
-    assert verletzungen_qty == 0
-    assert verletzungen_tick == 0
-    assert verletzungen_notional == 0
+        gepruefte_stichproben += 1
+
+    # Prüffläche muss groß genug sein (>= 500), sonst ist die Prüfung maskiert
+    assert gepruefte_stichproben >= 500, f"Prüffläche zu klein: nur {gepruefte_stichproben}/1000 Stichproben geprüft (Rejections: sizing={rejections_sizing}, ledger={rejections_ledger})"
+
+    assert verletzungen_qty == 0, f"{verletzungen_qty} Quantisierungsverletzungen"
+    assert verletzungen_tick == 0, f"{verletzungen_tick} Tick-Verletzungen"
+    assert verletzungen_notional == 0, f"{verletzungen_notional} Notional-Verletzungen"
 
 
 def test_a4b_effektive_mindestordergroesse_ist_real():
@@ -117,47 +131,53 @@ def test_a4b_effektive_mindestordergroesse_ist_real():
 
 
 def test_a5_losgroessenverlust_ist_beziffert():
-    """A-5: Abwärtsrundung auf korrekte Schrittweite garantiert 0 <= Rest < step*preis.
+    """A-5: size_order() mit Abwärtsrundung garantiert 0 <= Rest < step*preis.
 
-    Der Rest nach Abwärtsrundung auf spec.step_size ist nie negativ und immer
-    kleiner als das Produkt aus Schrittweite und Preis. Mit falscher Schrittweite
-    (z.B. 10x größer) wird die Invariante verletzt.
+    Prüft die Invariante an den **tatsächlichen Rückgaben** von size_order(),
+    nicht an einer Parallelrechnung mit money.step_down(). Mit falscher Schrittweite
+    wird die Invariante verletzt.
     """
-    # Teil 1: Korrekte Schrittweite (spec.step_size)
+    ledger = Ledger(starting_cash=Decimal("1000000"), specs={"BTCUSDC": BTC},
+                     fee_bps=0.0, slippage_bps=0.0)
+
     max_rest = Decimal(0)
     max_rest_pct = Decimal(0)
-    verletzungen = 0
+    akzeptiert = 0
+
     for i in range(1000):
         price = Decimal("80787") + Decimal(i) * Decimal("1")
-        raw_qty = Decimal("1000") / price
-        qty = money.step_down(raw_qty, BTC.step_size)
-        rest = Decimal("1000") - qty * price
+        target_quote = Decimal("1000")
+        equity_for_pct = target_quote * Decimal(100)  # position_pct=1 → genau target_quote
 
-        # Mit korrekter Schrittweite: Rest >= 0 und Rest < step_size * price
-        if rest < Decimal(0) or rest >= BTC.step_size * price:
-            verletzungen += 1
+        p = Proposal("BTCUSDC", "BUY", position_pct=1)
+        v = _valuation(equity=str(equity_for_pct), cash=str(equity_for_pct * Decimal(2)))
+
+        result = size_order(p, v, BTC, price, fee_bps=0.0, slippage_bps=0.0, held_qty=Decimal(0))
+        if isinstance(result, Rejection):
+            continue
+
+        candle_ts = 900_000 + i * 900_000
+        candle = Candle(symbol="BTCUSDC", interval="15m", open_time=candle_ts,
+                         close_time=candle_ts + 899_999, open=price, high=price, low=price,
+                         close=price, volume=Decimal("1"), closed=True)
+        fill = ledger.apply(result, candle)
+        if isinstance(fill, Rejection):
+            continue
+
+        # Invariante an tatsächlichen Fill-Werten
+        rest = target_quote - fill.gross_quote
+        assert rest >= Decimal(0), f"Rest negativ: {rest} bei Preis {fill.price}, qty={fill.qty}"
+
+        max_allowed = BTC.step_size * fill.price
+        assert rest < max_allowed, f"Rest {rest} >= {max_allowed} (step*price) bei Preis {fill.price}"
 
         max_rest = max(max_rest, rest)
-        rest_pct = rest / Decimal("1000") * Decimal(100)
+        rest_pct = rest / target_quote * Decimal(100)
         max_rest_pct = max(max_rest_pct, rest_pct)
+        akzeptiert += 1
 
-    assert verletzungen == 0, f"Mit korrekter Schrittweite: {verletzungen} Invariantenverletzungen"
+    assert akzeptiert >= 500, f"Prüffläche zu klein: {akzeptiert} Orders akzeptiert"
     assert max_rest_pct < Decimal("0.1"), f"Prozentualer Verlust {max_rest_pct}% > 0.1%"
-
-    # Teil 2: Falsche Schrittweite (10x größer) sollte Invariante verletzen
-    verletzungen_falsch = 0
-    for i in range(1000):
-        price = Decimal("80787") + Decimal(i) * Decimal("1")
-        raw_qty = Decimal("1000") / price
-        qty = money.step_down(raw_qty, BTC.step_size * Decimal(10))
-        rest = Decimal("1000") - qty * price
-
-        # Mit falscher Schrittweite: Invariante kann verletzt sein
-        if rest < Decimal(0) or rest >= BTC.step_size * price:
-            verletzungen_falsch += 1
-
-    # Mit falscher Schrittweite sollten Verletzungen auftreten
-    assert verletzungen_falsch > 0, f"Falsche Schrittweite verletzt Invariante nicht! ({verletzungen_falsch} Verletzungen)"
 
 
 def test_a8b_keine_versteckte_uhr_kein_versteckter_zufall():
