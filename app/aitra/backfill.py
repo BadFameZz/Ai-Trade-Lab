@@ -108,13 +108,29 @@ def _parse_args(argv):
 
 
 def main(argv: list[str] | None = None) -> int:
+    """CLI-Einstieg. backfill_symbol() faengt ausschliesslich die Ratenbegrenzung ab
+    und wartet sie aus - eine Bibliotheksfunktion soll sonst laut scheitern. Hier,
+    an der Grenze zum Bediener, wird jeder andere BinanceError (5xx, verstuemmelte
+    oder zu grosse Antwort) abgefangen, als Ereignis geloggt (ohne Antwortkoerper)
+    und mit Rueckgabewert 1 gemeldet statt als roher Traceback durchzureichen
+    (Fixrunde 1, Befund 3). Bereits geschriebene Bloecke bleiben in der Datenbank -
+    store.upsert_candles ist idempotent (A-13/A-15), ein erneuter Lauf setzt fort
+    statt zu verdoppeln. Das ist kein Leck, das aufgeraeumt werden muesste.
+    """
     args = _parse_args(argv)
     cfg = config.load()
     db_path = Path(args.db) if args.db else cfg.data_dir / "aitra.db"
     conn = db.connect(db_path)
     db.migrate(conn)
     client = BinanceClient(cfg.binance_base_url)
-    result = backfill_symbol(client, conn, args.symbol.upper(), args.interval, args.days)
+    symbol = args.symbol.upper()
+    try:
+        result = backfill_symbol(client, conn, symbol, args.interval, args.days)
+    except BinanceError as e:
+        db.log_event(conn, "BACKFILL", "ERROR", "BACKFILL_FAILED",
+                     f"{symbol} {args.interval}: {type(e).__name__}")
+        conn.close()
+        return 1
     print(f"{result.symbol} {result.interval}: {result.fetched} Kerzen in {result.requests} "
           f"Anfragen, {result.gaps} Luecken, Gewicht {result.weight_used}", file=sys.stderr)
     conn.close()
