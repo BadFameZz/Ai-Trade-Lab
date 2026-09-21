@@ -163,3 +163,15 @@ def test_benchmark_symbol_wird_gegen_symbol_re_geprueft(monkeypatch, tmp_path):
     monkeypatch.setenv("BENCHMARK_SYMBOL", "btc-usdc")
     with pytest.raises(ConfigError):
         load()
+
+
+def test_narrow_trading_window_true_bei_100_usdc(monkeypatch, tmp_path):
+    monkeypatch.setenv("DATA_DIR", str(tmp_path)); monkeypatch.setenv("ADMIN_TOKEN", "x" * 32)
+    monkeypatch.setenv("STARTING_BALANCE", "100")
+    assert load().narrow_trading_window is True
+
+
+def test_narrow_trading_window_false_bei_10000_usdc(monkeypatch, tmp_path):
+    monkeypatch.setenv("DATA_DIR", str(tmp_path)); monkeypatch.setenv("ADMIN_TOKEN", "x" * 32)
+    monkeypatch.setenv("STARTING_BALANCE", "10000")
+    assert load().narrow_trading_window is False

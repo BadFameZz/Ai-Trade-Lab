@@ -1,8 +1,12 @@
-# AI Trade Lab (Aitra) – v0.2.1
+# AI Trade Lab (Aitra) – v0.3.0
 
-Privates Paper-Trading-Labor. Läuft in einem eigenen Debian-LXC auf Proxmox,
-komplett lokal – ohne Cloud-Dienste, ohne sylvron.de. Der Quellcode liegt in
-einem privaten GitHub-Repo; im Betrieb ruft die App nichts davon ab.
+Privates Paper-Trading-Labor. Läuft in einem eigenen Debian-LXC auf Proxmox. Fast
+komplett lokal: Konfiguration, Datenbank, Dashboard und Ausführung bleiben auf dem
+eigenen Server. Eine Ausnahme seit v0.3.0: Für Kursdaten ruft die App die öffentlichen,
+lesenden Endpunkte von `api.binance.com` ab. Dabei werden ausschließlich Symbol,
+Intervall und Zeitraum übertragen — **keine Kontodaten, keine Kennungen, keine
+API-Schlüssel**; solche existieren im Projekt nicht. Der Quellcode liegt in einem
+privaten GitHub-Repo; im Betrieb ruft die App nichts davon ab.
 
 > Kein Trading-Bot mit Gewinngarantie. Aktuell: Dashboard, Persistenz, Risk Engine,
 > Kill Switch, Health. Marktdaten, Paper-Ledger und Strategien folgen (Phase 2+).
@@ -29,6 +33,16 @@ Backup → neue Version → Healthcheck → bei Fehler automatischer Rollback.
 Daten (`data/`) und `.env` bleiben erhalten. Die letzten 5 Backups liegen im CT unter
 `/opt/ai-trade-lab-backups/`.
 
+**Handgriff nach dem Sprung von v0.2.x auf v0.3.0:** Ein Update überschreibt die `.env`
+nicht (dort steht der Admin-Token). Bestandscontainer laufen danach mit
+`STARTING_BALANCE=100` weiter — die App warnt seit v0.3.0 selbst darüber
+(`NARROW_TRADING_WINDOW` unter „Protokolle"), aber wer es sofort beheben will:
+
+```bash
+pct exec <CTID> -- sed -i 's/^STARTING_BALANCE=.*/STARTING_BALANCE=10000/' /opt/ai-trade-lab/.env
+pct exec <CTID> -- docker compose -f /opt/ai-trade-lab/docker-compose.yml restart
+```
+
 ## Sicherheit
 
 - Live-Trading ist nicht implementiert und hart gesperrt (egal was in `.env` steht)
@@ -44,6 +58,8 @@ Daten (`data/`) und `.env` bleiben erhalten. Die letzten 5 Backups liegen im CT 
   Prüfen vom Mobilfunk aus, mit ausgeschaltetem WLAN:
   `http://[DEINE-IPV6]:8787` — lädt dort nichts, blockt der Router. Gegenprobe, ob das Handy
   überhaupt IPv6 hat: test-ipv6.com. Ein negativer Test ohne IPv6 beweist nichts.
+- Ausgehender Netzverkehr beschränkt sich auf `api.binance.com` (und den Ausweichhost
+  `data-api.binance.vision`), nur HTTPS, mit Host-Allowlist und ohne Weiterleitungen
 
 ## API
 

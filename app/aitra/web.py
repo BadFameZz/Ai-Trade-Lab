@@ -37,6 +37,13 @@ def create_app(cfg: Config | None = None) -> Flask:
                             reason="Paper-Engine initialisiert; wartet auf validierte Marktdaten.",
                             approved=1, risk_code="NO_ORDER", risk_reason="Keine Order")
         db.log_event(init_conn, "SYSTEM", "INFO", "STARTUP", f"v{VERSION}, mode=PAPER")
+        if cfg.narrow_trading_window:
+            db.log_event(
+                init_conn, "RISK_ENGINE", "WARN", "NARROW_TRADING_WINDOW",
+                f"STARTING_BALANCE={money.to_text(cfg.starting_balance)} mit "
+                f"MAX_POSITION_PCT={cfg.max_position_pct}% ergibt ein zu enges "
+                f"Handelsfenster (Schwelle 1.200 USDC, K-1)",
+            )
     finally:
         # Fixrunde 1, Punkt 3 (Koordinator/Reviewer): `with db.connect(...) as conn:`
         # sieht wie ein automatisch schliessender Context-Manager aus, ist es bei

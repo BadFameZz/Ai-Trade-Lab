@@ -282,3 +282,18 @@ def test_create_app_schliesst_alle_eigenen_verbindungen(tmp_path, monkeypatch):
         f"Pruefflaeche: {noch_offen} von {len(geoeffnet)} waehrend create_app() "
         f"geoeffneten Verbindungen sind noch offen"
     )
+
+
+def test_a22_narrow_trading_window_erzeugt_genau_ein_ereignis(tmp_path):
+    cfg = Config(Decimal("100"), 10, 2, 50, tmp_path, "t" * 32, narrow_trading_window=True)
+    rows = create_app(cfg).test_client().get("/api/events?limit=200").get_json()
+    treffer = [r for r in rows if r["event"] == "NARROW_TRADING_WINDOW"]
+    assert len(treffer) == 1, f"Pruefflaeche: {len(treffer)} Ereignisse statt 1"
+    assert "1200" in treffer[0]["detail"] or "1.200" in treffer[0]["detail"]
+
+
+def test_a22_kein_ereignis_bei_ausreichendem_kapital(tmp_path):
+    cfg = Config(Decimal("10000"), 10, 2, 50, tmp_path, "t" * 32, narrow_trading_window=False)
+    rows = create_app(cfg).test_client().get("/api/events?limit=200").get_json()
+    treffer = [r for r in rows if r["event"] == "NARROW_TRADING_WINDOW"]
+    assert treffer == [], f"Pruefflaeche: {len(treffer)} Ereignisse statt 0"

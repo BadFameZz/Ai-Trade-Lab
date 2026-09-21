@@ -53,6 +53,7 @@ class Config:
     slippage_bps: float = 5.0
     benchmark_symbol: str = "BTCUSDC"
     candle_retention_days: int = 400
+    narrow_trading_window: bool = False
 
 
 def _num(name: str, default: float, lo: float, hi: float) -> float:
@@ -195,7 +196,8 @@ def load() -> Config:
     max_position_pct = _num("MAX_POSITION_PCT", 10, 0, 25)
     binance_base_url = _binance_base_url()
 
-    if _narrow_trading_window(starting_balance, max_position_pct):
+    eng_fenster = _narrow_trading_window(starting_balance, max_position_pct)
+    if eng_fenster:
         log.warning(
             "NARROW_TRADING_WINDOW: STARTING_BALANCE=%s mit MAX_POSITION_PCT=%s%% "
             "ergibt ein zu enges Handelsfenster (< 20x der effektiven Mindestordergroesse, K-1)",
@@ -240,4 +242,5 @@ def load() -> Config:
         slippage_bps=slippage_bps,
         benchmark_symbol=benchmark_symbol,
         candle_retention_days=candle_retention_days,
+        narrow_trading_window=eng_fenster,
     )
