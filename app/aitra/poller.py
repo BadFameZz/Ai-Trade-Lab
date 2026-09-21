@@ -30,7 +30,8 @@ from .binance import BinanceClient, BinanceError, BinanceRateLimited
 from .config import Config
 from .execute import ExecutionContext
 from .ledger import Ledger, Position
-from .marketdata import Candle, Clock, Staleness, WallClock, interval_seconds, staleness
+from .marketdata import (Candle, Clock, Staleness, WallClock, interval_seconds,
+                          projizierte_serverzeit, staleness)
 from .risk import RiskEngine
 
 log = logging.getLogger("aitra.poller")
@@ -132,7 +133,9 @@ def poll_once(pc: PollerContext) -> PollOutcome:
             pc.consecutive_failures += 1
             return PollOutcome(ok=False, staleness=None, fills=[],
                                 backoff_s=_backoff(pc.consecutive_failures))
-    server_time_ms = pc.last_server_time_ms
+    # B-1: NIE der rohe Cache-Wert (siehe marketdata.projizierte_serverzeit).
+    server_time_ms = projizierte_serverzeit(pc.clock, pc.last_server_time_ms,
+                                             pc.last_time_check_ms)
 
     neue_kerzen: dict[str, Candle] = {}
     fehlgeschlagen = False

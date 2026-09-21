@@ -108,6 +108,47 @@ class Staleness:
     clock_skew_s: float
 
 
+def projizierte_serverzeit(clock: Clock, last_server_time_ms: int | None,
+                            last_time_check_ms: int | None) -> int | None:
+    """Die zuletzt gemessene Serverzeit, fortgeschrieben um die seither
+    vergangene Zeit - NICHT der rohe Cache-Wert.
+
+    WARUM (B-1 aus dem Gesamtreview A2, Blocker): server_time() wird nach Spec
+    11.3 hoechstens alle 15 min geholt. staleness() rechnet
+    clock_skew_s = abs(now - server_time_ms) gegen die AKTUELLE Uhr. Geht der
+    gecachte Wert dort hinein, waechst der gemeldete Uhrversatz um eine
+    Sekunde pro Sekunde: mit MARKET_CLOCK_SKEW_KILL_S=30 und MARKET_POLL_S=60
+    war der Lieferzustand nach 60 s 'stale', der Kill Switch gesetzt und -
+    weil _apply_staleness() ihn nur setzt - nie wieder geloest. Ab da lehnte
+    die RiskEngine jede Order ab. Gemessen vor der Behebung: "Zyklus 1
+    (t=60s): status='stale', Datenalter 260s, Uhrversatz 60s" - bei
+    synchroner Uhr und puenktlichen Kerzen.
+
+    Mit der Fortschreibung ist abs(now - projiziert) genau der Versatz, der
+    bei der LETZTEN Messung festgestellt wurde. Das ist eine ehrliche Aussage:
+    zwischen zwei Abfragen wird kein neuer Versatz erfunden. Wer das hier
+    spaeter zu `return pc.last_server_time_ms` "vereinfacht", baut B-1 wieder
+    ein.
+
+    Zweite Wirkung, ausdruecklich gewollt: derselbe Wert geht an
+    BinanceClient.klines(), das die laufende Kerze ueber
+    `close_time >= server_time_ms` verwirft. Mit dem rohen Cache-Wert galt
+    dort eine bis zu 15 min ALTE Grenze - jede in diesem Fenster geschlossene
+    Kerze wurde als "laufend" weggeworfen und erst nach der naechsten
+    Zeitabfrage uebernommen. Die Fortschreibung ist auch dafuer die richtige
+    Grenze (Serverzeit + lokal vergangene Zeit), nicht die Containeruhr:
+    Spec 8.1 bleibt gewahrt.
+
+    Kosten bei Irrtum: driftet die Containeruhr zwischen zwei Abfragen wirklich
+    weg, merken wir es bis zu 15 min spaeter, und die klines-Grenze ist um
+    genau diese Drift daneben. Das ist der Preis des Ratenbudgets aus Spec
+    11.3 und bewusst akzeptiert.
+    """
+    if last_server_time_ms is None or last_time_check_ms is None:
+        return None
+    return last_server_time_ms + (clock.now_ms() - last_time_check_ms)
+
+
 def staleness(
     clock: Clock,
     latest_close_time_ms: int | None,

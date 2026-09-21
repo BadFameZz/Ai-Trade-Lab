@@ -411,13 +411,16 @@ def test_poll_once_bleibt_ok_knapp_unter_der_warn_schwelle(tmp_path):
 
 def _client_mit_dynamischer_serverzeit(kerzen_je_symbol: dict[str, list], clock: SimClock) -> BinanceClient:
     """Wie _client_fuer(), aber serverTime folgt der Uhr statt an ihrem
-    Konstruktionszeitpunkt zu haengen. Noetig, sobald ein Test die Uhr ueber
-    mehrere poll_once()-Aufrufe hinweg vorstellt UND denselben Client
-    wiederverwendet: sonst wird server_time_ms nach dem ersten Aufruf nur noch
-    alle 15 min neu geholt (_TIME_CHECK_INTERVAL_MS) und veraltet dabei
-    schneller als die Uhr - der Uhrversatz allein loest dann 'stale' aus,
-    unabhaengig vom eigentlich getesteten Datenalter (genau der Fehler, den
-    der erste Entwurf dieses Tests hatte, gemessen)."""
+    Konstruktionszeitpunkt zu haengen - so verhaelt sich ein echter, mit dem
+    Container synchroner Binance-Server ueber mehrere Zyklen hinweg.
+
+    Richtigstellung (Gesamtreview A2, B-1): hier stand frueher, der Uhrversatz
+    wachse, weil "die SimClock springt statt zu ticken". Das war eine falsche
+    Diagnose. Der Versatz wuchs, weil poll_once() den GECACHTEN server_time-Wert
+    an staleness() gab, die ihn gegen die aktuelle Uhr rechnet - mit einer
+    echten Wanduhr genauso wie mit der SimClock. Der Fehler lag im
+    Produktivcode, nicht in der Testuhr; behoben ueber
+    marketdata.projizierte_serverzeit()."""
     def klines(url):
         qs = parse_qs(urlsplit(url).query)
         sym = qs["symbol"][0]
@@ -438,21 +441,20 @@ def test_poll_once_drosselt_lagging_ereignisse_auf_hoechstens_eins_pro_15min(tmp
     genau an der Drosselschwelle, Datenalter am Ende 2300s - weiterhin sicher
     unter kill_eff=2700s, also weiterhin 'warn', nie 'stale').
 
-    market_clock_skew_kill_s wird hochgesetzt: server_time() wird laut Spec
-    11.3 hoechstens alle 15 min neu geholt (_TIME_CHECK_INTERVAL_MS), unsere
-    Sprünge bleiben bewusst darunter (300s je Schritt) - zwischen zwei
-    Aktualisierungen waechst der gemessene Uhrversatz einer SimClock (die
-    springt statt zu ticken) sonst unabhaengig vom hier getesteten Datenalter
-    und würde faelschlich selbst 'stale' ausloesen. Das ist kein Freibrief:
-    es isoliert nur die hier geprüfte Eigenschaft (Drosselung des
-    warn-Ereignisses) von einer zweiten, bereits anderswo geprüften Schwelle
-    (Uhrversatz, A-11b)."""
+    Aufgeraeumt im Gesamtreview A2 (B-1): dieser Test lief zuvor mit
+    market_clock_skew_kill_s=100_000, begruendet mit einer SimClock, "die
+    springt statt zu ticken". Die Begruendung war falsch und die Umgehung hat
+    einen Blocker zugedeckt - der gemeldete Uhrversatz wuchs, weil der
+    GECACHTE server_time-Wert gegen die aktuelle Uhr gerechnet wurde (B-1).
+    Seit marketdata.projizierte_serverzeit() ist der gemeldete Versatz hier 0,
+    und der Test laeuft mit der ausgelieferten Schwelle
+    (MARKET_CLOCK_SKEW_KILL_S=30) - so, wie der Nutzer ihn betreibt."""
     clock = SimClock(10_000_000)
     kerzen = {"BTCUSDC": [_kerze(clock.now_ms() - 1_400_000 - 900_000, 900)]}
     client = _client_mit_dynamischer_serverzeit(kerzen, clock)
     conn = db.connect(tmp_path / "a.db")
     db.migrate(conn)
-    cfg = _cfg(tmp_path, market_clock_skew_kill_s=100_000)
+    cfg = _cfg(tmp_path)  # ausgelieferte Schwellen, keine Umgehung mehr
     pc = poller.build_context(conn, cfg, SPECS, clock=clock, client=client)
 
     def anzahl_lagging() -> int:
@@ -522,3 +524,69 @@ def test_run_forever_loggt_poll_cycle_exception_bei_unerwartetem_fehler(tmp_path
         "SELECT detail FROM events WHERE event='POLL_CYCLE_EXCEPTION'"
     ).fetchone()["detail"]
     assert detail == "AttributeError", f"Ausnahmetyp im Detail erwartet, gemessen: {detail!r}"
+
+
+# --------------------------------------------------------------------------
+# B-1: Der Auslieferungszustand ueber viele Zyklen (Gesamtreview A2)
+# --------------------------------------------------------------------------
+
+_INTERVALL_MS = 900_000
+
+
+def _kerzen_zum_uhrstand(clock: SimClock) -> list:
+    """Die zwei zuletzt GESCHLOSSENEN 15m-Kerzen zum aktuellen Uhrstand.
+
+    'Puenktliche Kerzen': Binance liefert genau das, was zu dieser Sekunde
+    geschlossen ist - kein Rueckstand, keine Luecke."""
+    grenze = (clock.now_ms() // _INTERVALL_MS) * _INTERVALL_MS
+    return [_kerze(grenze - 2 * _INTERVALL_MS, 900), _kerze(grenze - _INTERVALL_MS, 900)]
+
+
+def _client_synchrone_uhr(clock: SimClock) -> BinanceClient:
+    """Binance-Attrappe ohne Netz: serverTime == Containeruhr (Uhrversatz 0),
+    Kerzen puenktlich zum Uhrstand. Das ist der gutmuetigste denkbare
+    Auslieferungszustand - hier darf nichts 'stale' werden."""
+    def klines(url):
+        return FakeAntwort(_body(_kerzen_zum_uhrstand(clock)))
+
+    def zeit(url):
+        return FakeAntwort(_body({"serverTime": clock.now_ms()}))
+
+    return BinanceClient(BASIS, opener=FakeOpener({"/api/v3/klines": klines, "/api/v3/time": zeit}))
+
+
+def test_poll_once_bleibt_15_zyklen_ok_bei_synchroner_uhr_und_puenktlichen_kerzen(tmp_path):
+    """B-1 (Blocker, Gesamtreview A2): der Poller schaltete sich im
+    Lieferzustand nach 60 s selbst ab.
+
+    server_time() wird nach Spec 11.3 hoechstens alle 15 min geholt
+    (_TIME_CHECK_INTERVAL_MS). Der GECACHTE Wert ging jeden Zyklus an
+    staleness(), die clock_skew_s = abs(now - server_time_ms) gegen die
+    AKTUELLE Uhr rechnet - der gemeldete Versatz wuchs also um eine Sekunde
+    pro Sekunde. Mit MARKET_CLOCK_SKEW_KILL_S=30 und MARKET_POLL_S=60 war der
+    zweite Zyklus 'stale', der Kill Switch gesetzt und (weil _apply_staleness
+    ihn nur setzt) nie wieder geloest.
+
+    Hier laufen 16 Zyklen a 60 s mit synchroner Uhr und puenktlichen Kerzen.
+    Nichts an diesem Szenario rechtfertigt auch nur ein 'warn'."""
+    clock = SimClock(100 * _INTERVALL_MS + 200_000)  # 200 s nach dem Kerzenschluss
+    client = _client_synchrone_uhr(clock)
+    conn = db.connect(tmp_path / "a.db")
+    db.migrate(conn)
+    pc = poller.build_context(conn, _cfg(tmp_path), SPECS, clock=clock, client=client)
+
+    start_ms = clock.now_ms()
+    for zyklus in range(16):
+        outcome = poller.poll_once(pc)
+        t_s = (clock.now_ms() - start_ms) // 1000
+        assert outcome.staleness is not None, f"Zyklus {zyklus}: keine Veraltet-Auswertung"
+        assert outcome.staleness.status == "ok", (
+            f"Zyklus {zyklus} (t={t_s}s): status={outcome.staleness.status!r}, "
+            f"Datenalter {outcome.staleness.data_age_s:.0f}s, "
+            f"Uhrversatz {outcome.staleness.clock_skew_s:.0f}s"
+        )
+        assert db.get_state(conn, "kill_switch", "0") == "0", (
+            f"Zyklus {zyklus} (t={t_s}s): Kill Switch gesetzt, "
+            f"Uhrversatz {outcome.staleness.clock_skew_s:.0f}s"
+        )
+        clock.set(clock.now_ms() + 60_000)
