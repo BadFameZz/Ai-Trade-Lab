@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import itertools
 import json
 import os
 import re
@@ -58,11 +59,17 @@ def test_a7_decide_fn_sieht_nie_die_fuellkerze():
     Kerze vor der aktuellen; jeder Fill landet auf open_time + 900_000."""
     candles = _candles(8640)
     aufrufe = []
+    buy_positionen: list[int] = []
+    # Unabhaengiger Aufrufzaehler: er zaehlt, zum wievielten Mal decide_fn
+    # aufgerufen wurde, und wird NICHT aus len(history) oder aus einem Feld der
+    # Kerzen abgeleitet. Nur so ist die Fill-Pruefung unten eine echte Messung.
+    zaehler = itertools.count(1)
 
     def decide_fn(history):
+        pos = next(zaehler)
         aufrufe.append((history[-1].open_time, len(history)))
-        t = len(history)
-        if t % 500 == 0:
+        if pos % 500 == 0:
+            buy_positionen.append(pos)
             return Proposal("BTCUSDC", "BUY", position_pct=1)
         return Proposal("BTCUSDC", "WAIT")
 
@@ -81,10 +88,18 @@ def test_a7_decide_fn_sieht_nie_die_fuellkerze():
         assert open_time == candles[pos - 1].open_time
         assert open_time == (pos - 1) * 900_000
 
-    assert len(result.fills) > 0  # Pruefflaeche darf nicht leer sein
-    for f in result.fills:
-        entscheidungskerze_index = f.candle_open_time // 900_000 - 1
-        assert f.candle_open_time == candles[entscheidungskerze_index].open_time + 900_000
+    # Fix-Welle (Review-Befund 1): die frueher hier stehende Pruefung leitete den
+    # Index der Entscheidungskerze aus f.candle_open_time ab
+    # (f.candle_open_time // 900_000 - 1) und verglich ihn danach gegen genau diese
+    # Zahl -- eine Tautologie, die fuer jeden Wert wahr ist. Ein Look-ahead
+    # (next_candle=candles[t-1] statt candles[t]) waere gruen durchgelaufen.
+    # Jetzt kommt die Erwartung aus den unabhaengig mitgeschriebenen
+    # Aufrufpositionen der BUYs: ein BUY, der beim p-ten Aufruf von decide_fn
+    # beschlossen wurde, sieht candles[:p] und MUSS auf candles[p] fuellen --
+    # also open_time == p * 900_000 (E-006).
+    assert len(buy_positionen) == 17  # hergeleitet: 8.639 Aufrufe, jeder 500. -> 8639 // 500
+    assert len(result.fills) == len(buy_positionen)  # Pruefflaeche: jeder BUY muss fuellen
+    assert [f.candle_open_time for f in result.fills] == [p * 900_000 for p in buy_positionen]
 
 
 def test_a8_list_und_sqlite_quelle_liefern_identische_fills(tmp_path):
