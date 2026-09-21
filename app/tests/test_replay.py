@@ -8,6 +8,7 @@ import re
 import sqlite3
 import subprocess
 import sys
+import time
 import tracemalloc
 from decimal import Decimal
 from pathlib import Path
@@ -663,16 +664,33 @@ def test_cli_bericht_nennt_benchmark_gekauft(tmp_path):
     assert "Benchmark-gekauft=ja" in out.stderr, out.stderr
 
 
-def test_iso_ms_nimmt_ohne_zeitzone_utc_an():
+def test_iso_ms_nimmt_ohne_zeitzone_utc_an(monkeypatch):
     """Fix-Welle, Review-Befund 10: nackte Datumsangaben wurden als Lokalzeit
     gelesen. Diese Pruefung ist von der Zeitzone des Rechners unabhaengig --
-    sie vergleicht die nackte Form direkt mit der ausdruecklichen UTC-Form."""
-    assert _iso_ms("1970-01-01") == 0
-    assert _iso_ms("1970-01-01") == _iso_ms("1970-01-01T00:00:00+00:00")
-    assert _iso_ms("2025-01-01") == _iso_ms("2025-01-01T00:00:00+00:00")
-    assert _iso_ms("2025-07-01") == _iso_ms("2025-07-01T00:00:00+00:00")  # Sommerzeit
-    # Eine ausdrueckliche Zeitzone wird weiterhin respektiert.
-    assert _iso_ms("2025-01-01T00:00:00+01:00") == _iso_ms("2025-01-01") - 3_600_000
+    sie vergleicht die nackte Form direkt mit der ausdruecklichen UTC-Form.
+
+    Der Container laeuft in UTC: dort haelt jede der fuenf Zusicherungen
+    auch mit der alten, fehlerhaften Fassung (datetime.fromisoformat() ohne
+    tzinfo, .timestamp() in Lokalzeit == UTC == keine Verschiebung). Die
+    Zeitzone wird deshalb hier ausdruecklich auf Europe/Berlin gesetzt, statt
+    sich auf die Umgebung des CI-Laufs zu verlassen -- sonst ist dieser Test
+    nur unter einer zufaellig passenden Rechnerzeitzone ein Rot-Nachweis.
+    """
+    monkeypatch.setenv("TZ", "Europe/Berlin")
+    time.tzset()
+    try:
+        assert _iso_ms("1970-01-01") == 0
+        assert _iso_ms("1970-01-01") == _iso_ms("1970-01-01T00:00:00+00:00")
+        assert _iso_ms("2025-01-01") == _iso_ms("2025-01-01T00:00:00+00:00")
+        assert _iso_ms("2025-07-01") == _iso_ms("2025-07-01T00:00:00+00:00")  # Sommerzeit
+        # Eine ausdrueckliche Zeitzone wird weiterhin respektiert.
+        assert _iso_ms("2025-01-01T00:00:00+01:00") == _iso_ms("2025-01-01") - 3_600_000
+    finally:
+        # monkeypatch.undo() sofort statt am Fixture-Teardown: tzset() muss
+        # danach laufen, damit der Prozess fuer nachfolgende Tests wieder in
+        # der urspruenglichen Zeitzone steht.
+        monkeypatch.undo()
+        time.tzset()
 
 
 def test_cli_nackte_datumsangaben_sind_utc_unabhaengig_von_der_rechnerzeitzone(tmp_path):
