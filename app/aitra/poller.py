@@ -163,6 +163,13 @@ def poll_once(pc: PollerContext) -> PollOutcome:
     latest_close = min(pc.last_close_time.values()) if pc.last_close_time else None
     st = check_staleness(pc.cfg, pc.clock, latest_close, server_time_ms)
     _apply_staleness(pc, st)
+    # B-3 (Blocker, Gesamtreview A2): das Flag oben stammt vom ANFANG des
+    # Zyklus. _apply_staleness() hat den Kill Switch gerade eben in der
+    # Datenbank setzen koennen; ohne dieses erneute Lesen buchte
+    # resolve_pending() unmittelbar danach gegen das veraltete Flag im
+    # Speicher - gemessen: 798,64 USDC auf einer Kerze, die der Poller in
+    # derselben Zeile als veraltet erkannt hatte.
+    pc.ctx.kill_switch = db.get_state(pc.conn, "kill_switch", "0") == "1"
 
     fills = []
     for symbol, candle in neue_kerzen.items():

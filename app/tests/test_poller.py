@@ -647,3 +647,52 @@ def test_b2_poll_once_fuellt_nicht_auf_der_kerze_die_vor_der_entscheidung_oeffne
     assert Decimal("90000") < fill.price < Decimal("90100"), (
         f"Fill muss am open der 12:00-Kerze liegen (90000 + 5 bps), gemessen: {fill.price}"
     )
+
+
+def test_b3_kill_switch_loest_aus_und_im_selben_zyklus_wird_nicht_mehr_gebucht(tmp_path):
+    """B-3 (Blocker, Gesamtreview A2): poll_once() liest den Kill Switch AM
+    ANFANG in pc.ctx.kill_switch. _apply_staleness() setzt ihn danach in der
+    Datenbank. resolve_pending() las danach das VERALTETE Flag im Speicher -
+    und buchte im selben Durchlauf, auf Daten, die der Poller gerade als
+    veraltet erkannt hatte.
+
+    Aufbau: BNBUSDC haengt 46 min zurueck (kill_eff = 3*900s = 2700s), BTCUSDC
+    liefert eine frische Kerze. latest_close ist das Minimum ueber alle
+    Symbole, also ist der Zustand 'stale' und der Kill Switch faellt - waehrend
+    fuer BTCUSDC eine wirklich neuere Kerze ankommt, die den schwebenden
+    Vorschlag sonst fuellen wuerde. So haengt dieser Test an genau EINER
+    Eigenschaft (Kill Switch im selben Zyklus) und nicht am Verfall (E-006)
+    oder an der B-2-Grenze - beide sind hier erfuellt."""
+    from aitra.execute import execute_proposal
+    from aitra.risk import Proposal
+
+    JETZT = 100_020_000
+    btc_open = JETZT - 120_000 - 899_999      # BTCUSDC: 120 s alt, frisch
+    bnb_open = JETZT - 2_760_000 - 899_999    # BNBUSDC: 46 min alt -> stale
+    clock = SimClock(JETZT)
+    specs = {"BTCUSDC": money.BUILTIN_SPECS["BTCUSDC"], "BNBUSDC": money.BUILTIN_SPECS["BNBUSDC"]}
+    client = _client_fuer({"BTCUSDC": [_kerze(btc_open, 900)],
+                            "BNBUSDC": [_kerze(bnb_open, 900)]}, JETZT)
+    conn = db.connect(tmp_path / "a.db")
+    db.migrate(conn)
+    pc = poller.build_context(conn, _cfg(tmp_path), specs, clock=clock, client=client)
+
+    pending = execute_proposal(
+        Proposal("BTCUSDC", "BUY", 8), pc.ctx, marks={}, ts_ms=btc_open - 1,
+        ref_price=Decimal("81287.03"), start_of_day_equity=Decimal("10000"), next_candle=None,
+    )
+    assert pending.status == "pending_fill", f"Pruefflaeche: {pending}"
+    assert db.get_state(conn, "kill_switch", "0") == "0", "Pruefflaeche: Kill Switch startet aus"
+
+    outcome = poller.poll_once(pc)
+
+    assert outcome.staleness.status == "stale", f"Pruefflaeche: {outcome.staleness}"
+    assert db.get_state(conn, "kill_switch", "0") == "1", "Pruefflaeche: Kill Switch muss fallen"
+    assert outcome.fills == [], (
+        "im selben Zyklus gebucht, obwohl der Kill Switch gerade gefallen ist: "
+        + ", ".join(f"{f.symbol} {f.qty}@{f.price} = {f.gross_quote} USDC" for f in outcome.fills)
+    )
+    assert conn.execute("SELECT COUNT(*) c FROM fills").fetchone()["c"] == 0
+    row = conn.execute("SELECT risk_code FROM decisions WHERE id=?",
+                        (pending.decision_id,)).fetchone()
+    assert row["risk_code"] == "KILL_SWITCH", f"gemessen: {row['risk_code']!r}"
