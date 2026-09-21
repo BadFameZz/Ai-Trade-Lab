@@ -626,3 +626,74 @@ def test_journal_fill_rollt_bei_fehler_auf_dem_dritten_schreibvorgang_zurueck(tm
     assert ctx.conn.execute("SELECT COUNT(*) c FROM fills").fetchone()["c"] == 0
     row = ctx.conn.execute("SELECT fill_id FROM decisions WHERE run_id = ?", (ctx.run_id,)).fetchone()
     assert row["fill_id"] is None, "Entscheidung wurde trotz Rollback mit fill_id verknuepft"
+
+
+def _candle_oc(open_time: int, offen: str, schluss: str) -> Candle:
+    """Kerze mit unterschiedlichem Eroeffnungs- und Schlusskurs - noetig, um
+    einen Fill am *open* von einem Fill am *close* unterscheiden zu koennen."""
+    return Candle(symbol="BTCUSDC", interval="15m", open_time=open_time,
+                  close_time=open_time + 899_999, open=Decimal(offen), high=Decimal("999999"),
+                  low=Decimal("1"), close=Decimal(schluss), volume=Decimal("1"), closed=True)
+
+
+def test_b2_resolve_pending_fuellt_nicht_auf_einer_kerze_die_vor_der_entscheidung_oeffnete(tmp_path):
+    """B-2 (Blocker, Gesamtreview A2): E-006 verletzt - der Livepfad fuellte
+    auf einer Kerze, die VOR der Entscheidung geoeffnet hat.
+
+    resolve_pending() prueft Symbol, Kill Switch, Spec und Menge - aber nicht,
+    ob die Kerze juenger ist als die Entscheidung. poll_once() reicht jeden
+    Zyklus die neueste geschlossene Kerze durch, und das ist bis zu 15 min
+    dieselbe, die beim Entscheiden schon vorlag. Ergebnis: die Strategie
+    fuellt zu einem Preis, den sie beim Entscheiden schon kannte - ein
+    systematischer Rueckblick, der Papierergebnisse dauerhaft besser aussehen
+    laesst, als die Boerse je fuellt.
+
+    Die Entscheidung faellt auf dem Schluss der 11:45-Kerze
+    (pending_since_ms = deren close_time). Genau diese Kerze darf nicht
+    fuellen; erst die 12:00-Kerze darf, und zwar zu ihrem open."""
+    ctx = _ctx(tmp_path, clock_ms=90_120_000)
+    entscheidungskerze = _candle_oc(89_100_000, "80040.00", "80500.00")  # 11:45
+    folgekerze = _candle_oc(90_000_000, "90000.00", "91000.00")          # 12:00
+
+    pending = execute_proposal(
+        Proposal("BTCUSDC", "BUY", 8), ctx, marks={}, ts_ms=entscheidungskerze.close_time,
+        ref_price=entscheidungskerze.close, start_of_day_equity=Decimal("10000"), next_candle=None,
+    )
+    assert pending.status == "pending_fill", f"Pruefflaeche: {pending}"
+
+    fills_alt = resolve_pending(ctx, entscheidungskerze)
+    assert fills_alt == [], (
+        f"Fill auf der Entscheidungskerze selbst (open_time "
+        f"{entscheidungskerze.open_time} <= pending_since "
+        f"{entscheidungskerze.close_time}): {[str(f.price) for f in fills_alt]}"
+    )
+    assert ctx.conn.execute("SELECT COUNT(*) c FROM fills").fetchone()["c"] == 0
+    row = ctx.conn.execute("SELECT pending_since_ms FROM decisions WHERE id=?",
+                            (pending.decision_id,)).fetchone()
+    assert row["pending_since_ms"] == entscheidungskerze.close_time, (
+        "Die Zeile muss schwebend BLEIBEN, nicht verworfen werden"
+    )
+
+    fills_neu = resolve_pending(ctx, folgekerze)
+    assert len(fills_neu) == 1, f"erwartet 1 Fill auf der 12:00-Kerze, gemessen: {len(fills_neu)}"
+    assert fills_neu[0].candle_open_time == 90_000_000
+    assert fills_neu[0].price > Decimal("90000"), (
+        f"Fill muss am open der 12:00-Kerze (90000 + Slippage) liegen, gemessen: {fills_neu[0].price}"
+    )
+
+
+def test_b2_grenze_ist_exakt_pending_since_ms_plus_eins(tmp_path):
+    """Die Grenze auf die Millisekunde: eine Kerze, die genau bei
+    pending_since_ms oeffnet, ist noch die alte; pending_since_ms + 1 ist die
+    erste erlaubte. Genau dieselbe Grenze verspricht /api/risk/check dem
+    Client als expected_fill_after_ms (web.py) - ohne diesen Test koennte
+    eine der beiden Seiten um eine Millisekunde abweichen."""
+    ctx = _ctx(tmp_path, clock_ms=1_000_000)
+    pending = execute_proposal(
+        Proposal("BTCUSDC", "BUY", 8), ctx, marks={}, ts_ms=900_000,
+        ref_price=Decimal("81287.03"), start_of_day_equity=Decimal("10000"), next_candle=None,
+    )
+    assert pending.status == "pending_fill"
+
+    assert resolve_pending(ctx, _candle(900_000)) == [], "Kerze genau bei pending_since_ms"
+    assert len(resolve_pending(ctx, _candle(900_001))) == 1, "Kerze bei pending_since_ms + 1"

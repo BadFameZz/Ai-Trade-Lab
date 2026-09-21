@@ -195,6 +195,22 @@ def resolve_pending(ctx: ExecutionContext, candle: Candle) -> list[Fill]:
     for row in store_run.get_pending_decisions(ctx.conn, ctx.run_id):
         if row["symbol"] != candle.symbol:
             continue
+        if candle.open_time <= row["pending_since_ms"]:
+            # B-2 (Blocker, Gesamtreview A2): E-006 - gefuellt wird nur auf
+            # einer Kerze, die NACH der Entscheidung geoeffnet hat. poll_once()
+            # reicht jeden Zyklus die neueste geschlossene Kerze durch, und das
+            # ist bis zu 15 min dieselbe, die beim Entscheiden schon vorlag;
+            # ohne diese Grenze fuellte der Livepfad zu deren open - einem
+            # Preis, den die Entscheidung bereits kannte (gemessen: Vorschlag
+            # auf dem Schluss der 11:45-Kerze bei 80500, gefuellt zu 80080.02,
+            # dem open derselben Kerze plus Slippage). Ein systematischer
+            # Rueckblick: mit Echtgeld sehen Papierergebnisse dauerhaft besser
+            # aus, als die Boerse je fuellt.
+            # Die Zeile bleibt SCHWEBEND (kein reject) und verfaellt sonst
+            # regulaer ueber expire_stale_pending(). Die Grenze ist exakt
+            # dieselbe, die /api/risk/check dem Client als
+            # expected_fill_after_ms = close_time + 1 zusagt (web.py).
+            continue
         if ctx.kill_switch:
             store_run.reject_decision(
                 ctx.conn, row["id"], "KILL_SWITCH",

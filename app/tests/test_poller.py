@@ -590,3 +590,60 @@ def test_poll_once_bleibt_15_zyklen_ok_bei_synchroner_uhr_und_puenktlichen_kerze
             f"Uhrversatz {outcome.staleness.clock_skew_s:.0f}s"
         )
         clock.set(clock.now_ms() + 60_000)
+
+
+def _kerze_oc(open_time: int, offen: str, schluss: str) -> list:
+    """Rohkerze mit unterscheidbarem open und close (B-2)."""
+    return [open_time, offen, "999999.00", "1.00", schluss, "12.345",
+            open_time + 899_999, "1", 1, "0", "0", "0"]
+
+
+def test_b2_poll_once_fuellt_nicht_auf_der_kerze_die_vor_der_entscheidung_oeffnete(tmp_path):
+    """B-2 (Blocker) im Livepfad, genau das Szenario aus dem Gesamtreview A2:
+
+    11:45-Kerze open 80040, close 80500. Vorschlag auf ihrem Schluss
+    (ref_price 80500). Zyklus 12:02 liefert dieselbe 11:45-Kerze erneut -
+    vor der Behebung wurde dort zu 80080.02 gefuellt (80040 + 5 bps), dem
+    Eroeffnungskurs einer Kerze, die 16 min VOR der Entscheidung geoeffnet
+    hat. Erwartet nach E-006: 0 Fills bei 12:02 und ein Fill erst, wenn die
+    12:00-Kerze (open 90000) geschlossen ist."""
+    K1145, K1200 = 89_100_000, 90_000_000  # open_time der beiden Kerzen
+    clock = SimClock(90_120_000)           # 12:02
+    kerzen = {"BTCUSDC": [_kerze_oc(K1145, "80040.00", "80500.00")]}
+
+    def klines(url):
+        return FakeAntwort(_body(kerzen["BTCUSDC"]))
+
+    def zeit(url):
+        return FakeAntwort(_body({"serverTime": clock.now_ms()}))
+
+    client = BinanceClient(BASIS, opener=FakeOpener({"/api/v3/klines": klines, "/api/v3/time": zeit}))
+    conn = db.connect(tmp_path / "a.db")
+    db.migrate(conn)
+    pc = poller.build_context(conn, _cfg(tmp_path), SPECS, clock=clock, client=client)
+
+    from aitra.execute import execute_proposal
+    from aitra.risk import Proposal
+    pending = execute_proposal(
+        Proposal("BTCUSDC", "BUY", 8), pc.ctx, marks={}, ts_ms=K1145 + 899_999,
+        ref_price=Decimal("80500.00"), start_of_day_equity=Decimal("10000"), next_candle=None,
+    )
+    assert pending.status == "pending_fill", f"Pruefflaeche: {pending}"
+
+    ergebnis_1202 = poller.poll_once(pc)
+    assert ergebnis_1202.staleness.status == "ok", f"Pruefflaeche: {ergebnis_1202.staleness}"
+    assert ergebnis_1202.fills == [], (
+        f"Zyklus 12:02 hat gefuellt: {[str(f.price) for f in ergebnis_1202.fills]}"
+    )
+
+    clock.set(90_960_000)  # 12:16 - die 12:00-Kerze ist geschlossen
+    kerzen["BTCUSDC"] = [_kerze_oc(K1200, "90000.00", "91000.00")]
+    ergebnis_1216 = poller.poll_once(pc)
+    assert len(ergebnis_1216.fills) == 1, (
+        f"Zyklus 12:16 erwartet 1 Fill, gemessen: {len(ergebnis_1216.fills)}"
+    )
+    fill = ergebnis_1216.fills[0]
+    assert fill.candle_open_time == K1200
+    assert Decimal("90000") < fill.price < Decimal("90100"), (
+        f"Fill muss am open der 12:00-Kerze liegen (90000 + 5 bps), gemessen: {fill.price}"
+    )

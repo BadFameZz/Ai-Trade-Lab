@@ -297,3 +297,56 @@ def test_a22_kein_ereignis_bei_ausreichendem_kapital(tmp_path):
     rows = create_app(cfg).test_client().get("/api/events?limit=200").get_json()
     treffer = [r for r in rows if r["event"] == "NARROW_TRADING_WINDOW"]
     assert treffer == [], f"Pruefflaeche: {len(treffer)} Ereignisse statt 0"
+
+
+def test_b2_expected_fill_after_ms_ist_genau_die_grenze_die_der_server_anwendet(client, app):
+    """B-2, Nebenbefund aus dem Gesamtreview A2: web.py rechnet
+    expected_fill_after_ms aus und verspricht es dem Client - der Server
+    benutzte den Wert nie. Seit der B-2-Behebung gilt in resolve_pending()
+    `candle.open_time > pending_since_ms`, und pending_since_ms ist genau die
+    close_time, aus der web.py den Wert bildet. Dieser Test koppelt beide
+    Seiten auf die Millisekunde: eine Kerze eine ms VOR der zugesagten Grenze
+    darf nicht fuellen, eine Kerze GENAU an der Grenze muss."""
+    from aitra import dashboard
+    from aitra.execute import ExecutionContext, resolve_pending
+    from aitra.marketdata import Candle, SimClock
+    from aitra.risk import RiskEngine
+
+    _mit_marktdaten(app)
+    cfg = app.config["AITRA"]
+    body = client.post("/api/risk/check", headers={"X-Admin-Token": TOKEN},
+                        json={"symbol": "BTCUSDC", "action": "BUY", "position_pct": 8}).get_json()
+    assert body["status"] == "pending_fill", f"Pruefflaeche: {body}"
+    grenze = body["expected_fill_after_ms"]
+
+    def kerze(open_time: int) -> Candle:
+        return Candle(symbol="BTCUSDC", interval="15m", open_time=open_time,
+                       close_time=open_time + 899_999, open=Decimal("81287.03"),
+                       high=Decimal("81287.03"), low=Decimal("81287.03"),
+                       close=Decimal("81287.03"), volume=Decimal("1"), closed=True)
+
+    conn = db.connect(cfg.data_dir / "aitra.db")
+    # Im Lieferzustand legt poller.build_context() den Lauf "live" an; hier
+    # laeuft der Poller nicht (MARKET_DATA_ENABLED ist in der Fixture aus),
+    # und fills.run_id hat einen Fremdschluessel auf runs.
+    store_run.ensure_run(conn, "live", "live", db.now(), "0.3.0")
+    ctx = ExecutionContext(conn=conn, run_id="live", ledger=dashboard.build_live_ledger(conn, cfg),
+                            engine=RiskEngine(cfg), specs=app.config["AITRA_SPECS"],
+                            fee_bps=cfg.fee_bps, slippage_bps=cfg.slippage_bps,
+                            clock=SimClock(grenze + 60_000), kill_switch=False)
+    # SimClock statt WallClock: mit der echten Wanduhr laege
+    # now - pending_since_ms weit ueber pending_expiry_ms, expire_stale_pending()
+    # raeumte die Zeile schon im ERSTEN Aufruf ab - die erste Zusicherung waere
+    # dann aus dem falschen Grund gruen (gemessen: der zweite Aufruf fand 0
+    # Fills, weil nichts mehr schwebte).
+    zu_frueh = resolve_pending(ctx, kerze(grenze - 1))
+    assert zu_frueh == [], (
+        f"Kerze bei {grenze - 1} (eine ms vor der zugesagten Grenze {grenze}) hat gefuellt: "
+        f"{[str(f.price) for f in zu_frueh]}"
+    )
+    ctx.ledger = dashboard.build_live_ledger(conn, cfg)
+    genau = resolve_pending(ctx, kerze(grenze))
+    assert len(genau) == 1, (
+        f"Kerze genau an der zugesagten Grenze {grenze} hat nicht gefuellt (gemessen {len(genau)} Fills)"
+    )
+    conn.close()
