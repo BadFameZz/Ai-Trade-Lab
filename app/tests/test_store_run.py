@@ -53,7 +53,8 @@ def test_pending_decision_lebenszyklus(tmp_path):
     conn = _conn(tmp_path)
     did = db.add_decision(conn, symbol="BTCUSDC", action="BUY", reason="test", approved=1,
                            requested_position_pct=8)
-    store_run.mark_decision_pending(conn, did, pending_since_ms=1_000, ref_price=Decimal("81287.03"))
+    store_run.mark_decision_pending(conn, did, pending_since_ms=1_000, ref_price=Decimal("81287.03"),
+                                     base_qty=Decimal("0.01"))
     pending = store_run.get_pending_decisions(conn)
     assert len(pending) == 1
     assert pending[0]["id"] == did
@@ -61,11 +62,15 @@ def test_pending_decision_lebenszyklus(tmp_path):
     # ist beim Aufloesen wieder exakt derselbe Decimal.
     assert pending[0]["pending_ref_price"] == "81287.03000000"
     assert money.from_text(pending[0]["pending_ref_price"]) == Decimal("81287.03")
+    # Migration 4: die fertig bemessene Menge liegt ebenso kanonisch als TEXT bei (E-010)
+    assert pending[0]["pending_base_qty"] == "0.01000000"
+    assert money.from_text(pending[0]["pending_base_qty"]) == Decimal("0.01")
     store_run.resolve_decision(conn, did, fill_id=42)
     assert store_run.get_pending_decisions(conn) == []
-    row = conn.execute("SELECT fill_id, pending_ref_price FROM decisions WHERE id=?",
+    row = conn.execute("SELECT fill_id, pending_ref_price, pending_base_qty FROM decisions WHERE id=?",
                         (did,)).fetchone()
     assert row["fill_id"] == 42
+    assert row["pending_base_qty"] is None  # mit dem Fill aufgeraeumt (E-010)
     assert row["pending_ref_price"] is None  # mit dem Fill aufgeraeumt
 
 
@@ -122,7 +127,8 @@ def test_expire_decision_entfernt_aus_pending(tmp_path):
     conn = _conn(tmp_path)
     did = db.add_decision(conn, symbol="BTCUSDC", action="BUY", reason="test", approved=1,
                            requested_position_pct=8)
-    store_run.mark_decision_pending(conn, did, pending_since_ms=1_000, ref_price=Decimal("81287.03"))
+    store_run.mark_decision_pending(conn, did, pending_since_ms=1_000, ref_price=Decimal("81287.03"),
+                                     base_qty=Decimal("0.01"))
     assert len(store_run.get_pending_decisions(conn)) == 1
     store_run.expire_decision(conn, did)
     assert store_run.get_pending_decisions(conn) == []

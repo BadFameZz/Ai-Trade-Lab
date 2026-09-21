@@ -145,18 +145,21 @@ def get_equity_curve(conn: sqlite3.Connection, run_id: str, limit: int = 500) ->
 
 
 def mark_decision_pending(conn: sqlite3.Connection, decision_id: int, pending_since_ms: int,
-                           ref_price: Decimal) -> None:
-    """Legt einen genehmigten Vorschlag schwebend ab (E-006).
+                           ref_price: Decimal, base_qty: Decimal) -> None:
+    """Legt einen genehmigten, bereits bemessenen Vorschlag schwebend ab (E-006/E-010).
 
-    ref_price ist der zum *Vorschlagszeitpunkt* gueltige Referenzpreis. Er wird
-    mitgespeichert, weil resolve_pending() die Order sonst gegen die Fuellkerze
-    bemisst — also gegen einen Preis, den die Entscheidung noch nicht kennen
-    konnte. Replay bemisst gegen current.close; ohne diese Spalte lieferten live
-    und Replay verschiedene Mengen (E-001).
+    base_qty ist die zum *Vorschlagszeitpunkt* berechnete Ordermenge. Sie ist der
+    eigentliche Inhalt dieser Zeile: resolve_pending() bucht sie unveraendert und
+    bemisst nicht neu (E-010, Weg A).
+
+    ref_price ist der zugehoerige Referenzpreis. Er wird weiter mitgefuehrt,
+    aber nur noch als Journal- und Anzeigewert ("Vorschlag bei 81.287,03,
+    gefuellt bei 81.310,00"). Die Bemessung haengt nicht mehr an ihm.
     """
     conn.execute(
-        "UPDATE decisions SET pending_since_ms = ?, pending_ref_price = ? WHERE id = ?",
-        (pending_since_ms, money.to_text(ref_price, DP), decision_id),
+        "UPDATE decisions SET pending_since_ms = ?, pending_ref_price = ?, "
+        "pending_base_qty = ? WHERE id = ?",
+        (pending_since_ms, money.to_text(ref_price, DP), money.to_text(base_qty, DP), decision_id),
     )
     conn.commit()
 
@@ -164,8 +167,8 @@ def mark_decision_pending(conn: sqlite3.Connection, decision_id: int, pending_si
 def resolve_decision(conn: sqlite3.Connection, decision_id: int, fill_id: int,
                       commit: bool = True) -> None:
     conn.execute(
-        "UPDATE decisions SET fill_id = ?, pending_since_ms = NULL, pending_ref_price = NULL "
-        "WHERE id = ?",
+        "UPDATE decisions SET fill_id = ?, pending_since_ms = NULL, pending_ref_price = NULL, "
+        "pending_base_qty = NULL WHERE id = ?",
         (fill_id, decision_id),
     )
     if commit:
@@ -183,7 +186,7 @@ def reject_decision(conn: sqlite3.Connection, decision_id: int, code: str, reaso
     """
     conn.execute(
         "UPDATE decisions SET approved = 0, risk_code = ?, risk_reason = ?, "
-        "pending_since_ms = NULL, pending_ref_price = NULL WHERE id = ?",
+        "pending_since_ms = NULL, pending_ref_price = NULL, pending_base_qty = NULL WHERE id = ?",
         (code, reason, decision_id),
     )
     conn.commit()
@@ -192,7 +195,7 @@ def reject_decision(conn: sqlite3.Connection, decision_id: int, code: str, reaso
 def expire_decision(conn: sqlite3.Connection, decision_id: int) -> None:
     conn.execute(
         "UPDATE decisions SET pending_since_ms = NULL, pending_ref_price = NULL, "
-        "risk_code = 'PENDING_EXPIRED' WHERE id = ?",
+        "pending_base_qty = NULL, risk_code = 'PENDING_EXPIRED' WHERE id = ?",
         (decision_id,),
     )
     conn.commit()

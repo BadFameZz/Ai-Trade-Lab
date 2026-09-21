@@ -1,7 +1,7 @@
-# E-010 — `resolve_pending()` bewertet mit der Füllkerze (offen, Blocker für A2)
+# E-010 — resolve_pending() bewertet mit der Füllkerze (aufgelöst)
 
 - **Datum:** 2026-09-21
-- **Status:** **bewusst offen gelassen in A1** (Orchestrator) — **Blocker für Teilprojekt A2**
+- **Status:** **aufgelöst am 2026-09-21 über Weg A** (Teilprojekt A2, Aufgabe 2)
 - **Betrifft:** `app/aitra/execute.py` (`resolve_pending`), `app/aitra/replay.py` (`run_replay`)
 - **Spec:** E-001 (quellenagnostisches Ledger), E-006 (Fill auf der Folgekerze), Kriterium A-8
 - **Vorgeschichte:** Migration 3 / `pending_ref_price` (Fix-Welle A1, Commit `afbf80f`)
@@ -110,6 +110,27 @@ mehr als ein Symbol hält.
 
 Der Orchestrator entscheidet in A2. Aus Sicht von E-001 ist **Weg A** der einzige, der die
 Entscheidung trägt.
+
+## Auflösung (2026-09-21, Teilprojekt A2, Aufgabe 2)
+
+**Gewählt: Weg A.** Migration 4 fügt `decisions.pending_base_qty` hinzu.
+`execute_proposal()` legt die zum Vorschlagszeitpunkt bemessene Order dort ab;
+`resolve_pending()` ruft weder `size_order()` noch `Ledger.mark()` auf, sondern
+prüft den Kill Switch und reicht die gespeicherte Order an `Ledger.apply()`.
+
+Damit sind **beide** Ausprägungen erledigt: die Bewertung gegen die Füllkerze und
+das leere `_last_marks` nach einem Neustart — letzteres, weil beim Auflösen gar
+keine vollständige `Valuation` mehr gebraucht wird.
+
+**Die angekündigte Verhaltensänderung ist eingetreten:** Die Kassenprüfung liegt
+jetzt vollständig in `Ledger.apply()`. Eine zwischen Vorschlag und Füllung
+geschrumpfte Kasse führt zu `INSUFFICIENT_CASH` statt zu einer kleineren Order.
+Gemessen an `test_resolve_pending_ablehnung_ist_kein_verfall`, der unverändert
+grün bleibt und danach den Ledger-Wächter misst statt den aus `sizing.py`.
+
+**Neue Ablehnungscodes an schwebenden Zeilen:** `KILL_SWITCH` (Kill Switch
+zwischen Entscheidung und Ausführung ausgelöst) und `NO_BASE_QTY` (Zeile aus
+einer DB vor Migration 4).
 
 ## Kosten bei Irrtum
 

@@ -3,8 +3,9 @@
 Die einzige Funktion im Paket, die Ledger.apply() aufruft (A-6b) — verbindet
 RiskEngine.check() -> sizing.size_order() -> Ledger.apply() -> Journal (decisions/fills).
 Verwaltet zusaetzlich schwebende Vorschlaege (E-006): Ohne next_candle wird der
-Vorschlag als pending_fill abgelegt, bis resolve_pending() eine Folgekerze liefert
-oder expire_stale_pending() ihn nach pending_expiry_ms verwerfen laesst.
+Vorschlag als pending_fill abgelegt, bis resolve_pending() die gespeicherte Order
+mit einer Folgekerze bucht (E-010, Weg A), oder expire_stale_pending() ihn nach
+pending_expiry_ms verwerfen laesst.
 """
 from __future__ import annotations
 
@@ -14,7 +15,7 @@ from decimal import Decimal
 from typing import Mapping
 
 from . import db, money, store_run
-from .ledger import Fill, Ledger, Rejection
+from .ledger import Fill, Ledger, Order, Rejection
 from .marketdata import Candle, Clock
 from .risk import Proposal, RiskEngine
 from .sizing import size_order
@@ -132,9 +133,15 @@ def execute_proposal(
         return ExecutionResult(decision_id, False, order.code, order.reason, status="rejected")
 
     if next_candle is None:
-        # E-006, live: Folgekerze liegt noch nicht vor -> schwebend
-        store_run.mark_decision_pending(ctx.conn, decision_id, pending_since_ms=ts_ms, ref_price=ref_price)
-        return ExecutionResult(decision_id, True, "OK", "Order schwebt bis zur Folgekerze", status="pending_fill")
+        # E-006/E-010: Folgekerze liegt noch nicht vor -> die FERTIG BEMESSENE
+        # Order wird abgelegt, nicht nur der Referenzpreis. resolve_pending()
+        # bucht sie spaeter unveraendert.
+        store_run.mark_decision_pending(
+            ctx.conn, decision_id, pending_since_ms=ts_ms,
+            ref_price=ref_price, base_qty=order.base_qty,
+        )
+        return ExecutionResult(decision_id, True, "OK",
+                                "Order schwebt bis zur Folgekerze", status="pending_fill")
 
     fill = ctx.ledger.apply(order, next_candle)
     if isinstance(fill, Rejection):
@@ -146,53 +153,63 @@ def execute_proposal(
 
 
 def resolve_pending(ctx: ExecutionContext, candle: Candle) -> list[Fill]:
-    """Fuellt schwebende Vorschlaege fuer candle.symbol mit der nun vorliegenden Kerze.
+    """Bucht schwebende Vorschlaege fuer candle.symbol mit der nun vorliegenden Kerze.
 
-    Bemessen wird mit dem beim Vorschlag gespeicherten pending_ref_price, nicht
-    mit candle.open: candle.open IST der Fuellpreis, und wer die Menge gegen den
-    Fuellpreis bemisst, laesst die Entscheidung den eigenen Ausgang kennen.
-    Genau dieses Muster wurde in benchmark.py bereits als Critical
-    zurueckgenommen. Replay bemisst gegen current.close; nur mit dem
-    gespeicherten ref_price liefern live und Replay dieselbe Menge (E-001).
+    E-010 ist am 2026-09-21 ueber Weg A aufgeloest: Beim Aufloesen wird **nicht
+    neu bewertet und nicht neu bemessen**. Die Menge wurde zum
+    Vorschlagszeitpunkt berechnet und steht als decisions.pending_base_qty in
+    der Zeile; hier wird nur noch der Kill Switch geprueft und dann gebucht.
+
+    Warum: run_replay() bewertet, prueft und bemisst alles bei t und bucht auf
+    t+1 — in einem Aufruf. Bemaesse der Livepfad beim Aufloesen neu, haengen
+    equity (ueber target_quote) und cash (ueber INSUFFICIENT_CASH) an der
+    Fuellkerze, also an einem Preis, den die Entscheidung nicht kennen konnte.
+    Dieselbe Entscheidung ergaebe live eine andere Menge als im Replay, und A-8
+    ("drei Quellen, ein Hash") waere konstruktionsbedingt unerreichbar.
+
+    Zweite Wirkung, ausdruecklich gewollt: Ledger.mark() wird hier gar nicht
+    mehr aufgerufen. Damit verschwindet der zweite Befund aus E-010 — ein frisch
+    gestarteter Prozess hat ein leeres _last_marks, und mark() haette fuer jede
+    aus dem Journal rekonstruierte Position sofort geworfen.
+
+    Die Kill-Switch-Pruefung ist die einzige Ausnahme von der Paritaet, und sie
+    ist eine Sicherheitsfunktion: ein Vorschlag, den der Kill Switch zwischen
+    Entscheidung und Ausfuehrung einholt, darf nicht mehr fuellen. Im Zeitraffer
+    gibt es diese Luecke nicht, weil Entscheidung und Ausfuehrung in derselben
+    Iteration liegen.
+
+    Kosten bei Irrtum (aus E-010 uebernommen): Schrumpft die Kasse zwischen t
+    und t+1 durch einen Fill in einem anderen Symbol, lehnt Ledger.apply() mit
+    INSUFFICIENT_CASH ab, statt die Order zu verkleinern. Richtig, aber der
+    Vorschlag ist dann verloren. Tritt das gehaeuft auf, wird beim Aufloesen auf
+    die verfuegbare Kasse gedeckelt.
     """
     expire_stale_pending(ctx)
     filled: list[Fill] = []
     for row in store_run.get_pending_decisions(ctx.conn, ctx.run_id):
         if row["symbol"] != candle.symbol:
             continue
-        spec = ctx.specs.get(row["symbol"])
-        if spec is None:
+        if ctx.kill_switch:
+            store_run.reject_decision(
+                ctx.conn, row["id"], "KILL_SWITCH",
+                "Kill Switch aktiv – schwebender Vorschlag nicht gebucht",
+            )
+            continue
+        if row["symbol"] not in ctx.specs:
             store_run.reject_decision(ctx.conn, row["id"], "NO_SPEC",
-                                   f"Keine SymbolSpec für {row['symbol']}")
+                                       f"Keine SymbolSpec für {row['symbol']}")
             continue
-        roh_ref = row["pending_ref_price"]
-        if roh_ref is None:
-            # Zeile aus einer DB vor Migration 3: der Vorschlagspreis fehlt.
-            # Verwerfen ist richtig — mit candle.open weiterzurechnen waere
-            # genau der Look-ahead, den Migration 3 beseitigt. Eigener Code,
-            # nicht PENDING_EXPIRED: der Vorschlag ist nicht verfallen,
-            # sondern nicht mehr bemessbar.
-            store_run.reject_decision(ctx.conn, row["id"], "NO_REF_PRICE",
-                                   "Kein gespeicherter Vorschlagspreis (DB vor Migration 3)")
+        roh_menge = row["pending_base_qty"]
+        if roh_menge is None:
+            # Zeile aus einer DB vor Migration 4. Die Menge nachtraeglich zu
+            # berechnen waere genau die Neubemessung, die E-010 beseitigt.
+            store_run.reject_decision(
+                ctx.conn, row["id"], "NO_BASE_QTY",
+                "Keine gespeicherte Ordermenge (DB vor Migration 4)",
+            )
             continue
-        ref_price = money.from_text(roh_ref)
-        held = ctx.ledger.position(row["symbol"]).qty
-        proposal = Proposal(symbol=row["symbol"], action=row["action"],
-                             position_pct=row["requested_position_pct"] or 0.0)
-        # Nur fuer candle.symbol liegt ein frischer Preis vor. Alle uebrigen
-        # gehaltenen Positionen werden ausdruecklich mit ihrem zuletzt
-        # bekannten Kurs bewertet: wuerden sie fehlen, fielen sie aus der
-        # Equity und erzeugten einen Scheinverlust, der ueber
-        # to_portfolio_state() bis in die Tagesverlustgrenze durchschlaegt.
-        marks = {**ctx.ledger.last_marks, candle.symbol: candle.open}
-        valuation = ctx.ledger.mark(marks, ts_ms=ctx.clock.now_ms())
-        order = size_order(proposal, valuation, spec, ref_price, ctx.fee_bps, ctx.slippage_bps, held)
-        if isinstance(order, Rejection):
-            # Frueher PENDING_EXPIRED: ein INSUFFICIENT_CASH wurde als
-            # "verfallen" etikettiert und die Ursache war aus dem Journal
-            # nicht mehr lesbar.
-            store_run.reject_decision(ctx.conn, row["id"], order.code, order.reason)
-            continue
+        order = Order(symbol=row["symbol"], side=str(row["action"]).upper(),
+                       base_qty=money.from_text(roh_menge))
         fill = ctx.ledger.apply(order, candle)
         if isinstance(fill, Rejection):
             store_run.reject_decision(ctx.conn, row["id"], fill.code, fill.reason)

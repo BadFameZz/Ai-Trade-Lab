@@ -117,6 +117,18 @@ MIGRATIONS: list[str] = [
     """
     ALTER TABLE decisions ADD COLUMN pending_ref_price TEXT;
     """,
+    # 4 – die fertig bemessene Menge an der schwebenden Entscheidung (E-010, Weg A)
+    #     Ohne diese Spalte muesste resolve_pending() beim Aufloesen neu bemessen und
+    #     dafuer neu bewerten. equity und cash haengen dann an der Fuellkerze — an einem
+    #     Preis, den die Entscheidung nicht kennen konnte. run_replay() bemisst dagegen
+    #     bei t. Zwei verschiedene Mengen fuer dieselbe Entscheidung, entgegen E-001,
+    #     und A-8 ("drei Quellen, ein Hash") waere unerreichbar.
+    #     Geld steht als TEXT (E-007). Die Spalte ist nullbar; Zeilen aus einer aelteren
+    #     DB behalten NULL und werden von resolve_pending() mit NO_BASE_QTY abgelehnt.
+    #     Ruecknahme: ALTER TABLE decisions DROP COLUMN pending_base_qty; (SQLite >= 3.35)
+    """
+    ALTER TABLE decisions ADD COLUMN pending_base_qty TEXT;
+    """,
 ]
 
 

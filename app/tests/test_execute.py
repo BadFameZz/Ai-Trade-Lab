@@ -58,6 +58,7 @@ def _install_apply_guard():
 
 
 def _ctx(tmp_path: Path, clock_ms: int = 900_000, kill_switch: bool = False) -> ExecutionContext:
+    tmp_path.mkdir(parents=True, exist_ok=True)   # erlaubt _ctx(tmp_path / "unterordner")
     conn = db.connect(tmp_path / "a.db")
     db.migrate(conn)
     store_run.create_run(conn, "run-1", "replay", "2026-01-01T00:00:00Z", "0.3.0")
@@ -208,6 +209,10 @@ def test_a7b_resolve_pending_fuellt_bei_ankunft_der_folgekerze(tmp_path):
         start_of_day_equity=Decimal("10000"), next_candle=None,
     )
     assert pending.status == "pending_fill"
+    vorher = ctx.conn.execute(
+        "SELECT pending_base_qty FROM decisions WHERE id=?", (pending.decision_id,)
+    ).fetchone()["pending_base_qty"]
+    assert vorher is not None, "Migration 4: die bemessene Menge muss beim Einstellen stehen"
     fills = resolve_pending(ctx, _candle(1_800_000))
     assert len(fills) == 1
     assert fills[0].candle_open_time == 1_800_000
@@ -216,6 +221,7 @@ def test_a7b_resolve_pending_fuellt_bei_ankunft_der_folgekerze(tmp_path):
                             (pending.decision_id,)).fetchone()
     assert row["fill_id"] is not None
     assert row["pending_since_ms"] is None
+    assert fills[0].qty == money.from_text(vorher)  # nicht neu bemessen (E-010)
 
 
 def test_a7b_verfall_an_der_grenze_1799_vs_1801_sekunden(tmp_path):
@@ -305,18 +311,22 @@ def test_a14_rekonstruktion_aus_dem_journal_1000_fills(tmp_path):
     assert cash - fills[-1]["cash_after"] == Decimal("0")
 
 
-def test_resolve_pending_bemisst_mit_dem_ref_price_des_vorschlags(tmp_path):
-    """Fix-Welle, Review-Befund 3 — Spion analog test_benchmark.py.
+def test_resolve_pending_ruft_size_order_nicht_mehr_auf_e010(tmp_path):
+    """E-010, Weg A: Beim Aufloesen wird weder neu bewertet noch neu bemessen.
 
-    resolve_pending() bemass die Order mit ref_price=candle.open, also mit dem
-    Fuellpreis selbst. Dasselbe Muster wurde in benchmark.py bereits als
-    Critical zurueckgenommen; im Livepfad stand es unveraendert. Ergebnis waere
-    gewesen: Replay bemisst gegen current.close, live gegen candle.open — zwei
-    verschiedene Mengen fuer dieselbe Entscheidung, entgegen E-001, und A-8
-    (eine Quelle, ein Hash) in Teilprojekt A2 unerreichbar.
+    Vorgeschichte: resolve_pending() rief size_order() mit dem gespeicherten
+    pending_ref_price auf, bewertete dabei aber ueber Ledger.mark() gegen die
+    FUELLKERZE. equity (ueber target_quote) und cash (ueber INSUFFICIENT_CASH)
+    hingen damit an einem Preis, den die Entscheidung nicht kennen konnte -
+    dieselbe Entscheidung ergab live eine andere Menge als im Replay, und A-8
+    ("drei Quellen, ein Hash") war konstruktionsbedingt unerreichbar.
 
-    Die Fuellkerze traegt hier bewusst einen ganz anderen Preis (99.999) als
-    der Vorschlag (81.287,03), damit eine Verwechslung sofort auffaellt.
+    Der Spion zaehlt Aufrufe. Er darf bei 0 bleiben - und die Pruefflaeche ist
+    der echte Fill daneben: ohne ihn zaehlte ein Spion, der nie etwas zu sehen
+    bekam, dasselbe wie ein korrekter Livepfad.
+
+    Die Fuellkerze traegt bewusst einen ganz anderen Preis (99.999) als der
+    Vorschlag (81.287,03), damit eine Verwechslung sofort auffaellt.
     """
     ctx = _ctx(tmp_path)
     ref = Decimal("81287.03")
@@ -325,53 +335,65 @@ def test_resolve_pending_bemisst_mit_dem_ref_price_des_vorschlags(tmp_path):
         start_of_day_equity=Decimal("10000"), next_candle=None,
     )
     assert pending.status == "pending_fill"
-    # Migration 3: der Vorschlagspreis steht kanonisch als TEXT in der Zeile (E-007)
-    row = ctx.conn.execute("SELECT pending_ref_price FROM decisions WHERE id=?",
-                            (pending.decision_id,)).fetchone()
+
+    # Migration 4: die fertig bemessene Menge steht kanonisch als TEXT in der Zeile (E-007)
+    row = ctx.conn.execute(
+        "SELECT pending_ref_price, pending_base_qty FROM decisions WHERE id=?",
+        (pending.decision_id,),
+    ).fetchone()
     assert row["pending_ref_price"] == "81287.03000000"
+    gespeicherte_menge = money.from_text(row["pending_base_qty"])
+    assert gespeicherte_menge > Decimal("0")
 
     fuellkerze = _candle(1_800_000, "99999.00")
-    captured: dict = {}
-    from aitra.execute import size_order as _real_size_order
+    spion = {"aufrufe": 0}
+    from aitra.execute import size_order as _echtes_size_order
 
     def spy(*args, **kwargs):
-        captured["ref_price"] = args[3]  # 4. Positionsargument von size_order()
-        return _real_size_order(*args, **kwargs)
+        spion["aufrufe"] += 1
+        return _echtes_size_order(*args, **kwargs)
 
     with patch("aitra.execute.size_order", side_effect=spy):
         fills = resolve_pending(ctx, fuellkerze)
 
-    assert len(fills) == 1  # Pruefflaeche: der Spion muss einen echten Fill gesehen haben
-    assert captured["ref_price"] == ref
-    assert captured["ref_price"] != fuellkerze.open
-    # Gefuellt wird trotzdem zum Preis der Folgekerze (E-006) — nur bemessen
-    # wurde mit dem Vorschlagspreis.
+    # Pruefflaeche zuerst: ohne echten Fill misst der Spion nichts.
+    assert len(fills) == 1, "kein Fill - der Spion haette auch bei kaputtem Code 0 gezaehlt"
+    assert spion["aufrufe"] == 0, (
+        f"size_order() wurde beim Aufloesen {spion['aufrufe']}x aufgerufen - "
+        f"E-010 Weg A verlangt 0"
+    )
+    # Gebucht wurde exakt die gespeicherte Menge, nicht eine neu berechnete.
+    assert fills[0].qty == gespeicherte_menge
+    # Gefuellt wird trotzdem zum Preis der Folgekerze (E-006).
     assert fills[0].candle_open_time == 1_800_000
     assert fills[0].price > fuellkerze.open  # 99.999 + Slippage
 
 
-def test_resolve_pending_verwirft_zeilen_ohne_gespeicherten_ref_price(tmp_path):
-    """Bestandszeilen aus einer DB vor Migration 3 haben pending_ref_price NULL.
-    Mit candle.open weiterzurechnen waere genau der Look-ahead, den Migration 3
-    beseitigt — also verfallen sie, statt still falsch bemessen zu werden."""
+def test_resolve_pending_verwirft_zeilen_ohne_gespeicherte_menge(tmp_path):
+    """Bestandszeilen aus einer DB vor Migration 4 haben pending_base_qty NULL.
+
+    Die Menge nachtraeglich zu berechnen waere genau die Neubemessung, die
+    E-010 beseitigt - also wird die Zeile abgelehnt, mit eigenem Code. Nicht
+    PENDING_EXPIRED: der Vorschlag ist nicht verfallen, sondern nicht buchbar.
+    """
     ctx = _ctx(tmp_path)
     pending = execute_proposal(
         Proposal("BTCUSDC", "BUY", 8), ctx, marks={}, ts_ms=900_000,
         ref_price=Decimal("81287.03"), start_of_day_equity=Decimal("10000"), next_candle=None,
     )
-    ctx.conn.execute("UPDATE decisions SET pending_ref_price = NULL WHERE id = ?",
+    ctx.conn.execute("UPDATE decisions SET pending_base_qty = NULL WHERE id = ?",
                       (pending.decision_id,))
     ctx.conn.commit()
 
     assert resolve_pending(ctx, _candle(1_800_000)) == []
-    assert ctx.conn.execute("SELECT COUNT(*) c FROM fills").fetchone()["c"] == 0
-    row = ctx.conn.execute("SELECT approved, risk_code, pending_since_ms FROM decisions WHERE id=?",
-                            (pending.decision_id,)).fetchone()
-    # Eigener Code, nicht PENDING_EXPIRED: der Vorschlag ist nicht verfallen,
-    # sondern nicht mehr bemessbar (Review-Befund 6).
-    assert row["risk_code"] == "NO_REF_PRICE"
+    row = ctx.conn.execute(
+        "SELECT approved, risk_code, pending_since_ms FROM decisions WHERE id=?",
+        (pending.decision_id,),
+    ).fetchone()
+    assert row["risk_code"] == "NO_BASE_QTY"
     assert row["approved"] == 0
     assert row["pending_since_ms"] is None
+    assert ctx.conn.execute("SELECT COUNT(*) c FROM fills").fetchone()["c"] == 0
 
 
 def test_a2_kasse_und_mengen_nichtnegativ_ueber_execute_proposal(tmp_path):
@@ -424,12 +446,15 @@ def test_a2_kasse_und_mengen_nichtnegativ_ueber_execute_proposal(tmp_path):
     assert fills >= 133, f"Pruefflaeche zu klein: nur {fills} von 400 Versuchen gefuellt"
 
 
-def test_resolve_pending_bewertet_auch_das_andere_symbol(tmp_path):
-    """Fix-Welle, Review-Befund 5: resolve_pending() markierte nur das Symbol
-    der eintreffenden Kerze. Bei zwei gehaltenen Positionen fiel die andere aus
-    der Equity -- ein Scheinverlust, der ueber to_portfolio_state() bis in die
-    Tagesverlustgrenze durchschlaegt. Hier wird eine grosse BNB-Position
-    gehalten, waehrend ein BTC-Vorschlag schwebt und eine BTC-Kerze eintrifft.
+def test_resolve_pending_braucht_keine_marktpreise_nach_neustart_e010(tmp_path):
+    """Der zweite Befund aus E-010: _last_marks ist nach einem Neustart leer.
+
+    Ein neu gestarteter Live-Prozess laedt Positionen aus dem Journal, aber
+    Ledger._last_marks ist reiner In-Prozess-Zustand und beginnt leer. Bewertete
+    resolve_pending() noch ueber Ledger.mark(), wuerde der allererste Fillversuch
+    nach jedem Neustart mit "Kein Marktpreis fuer gehaltene Position ..." werfen,
+    sobald mehr als ein Symbol gehalten wird. Weg A loest das mit: es wird gar
+    nicht mehr bewertet.
     """
     ctx = _ctx(tmp_path)
     ctx.engine = RiskEngine(Config(Decimal("10000"), 100, 100, 100, tmp_path, "x" * 32))
@@ -442,8 +467,7 @@ def test_resolve_pending_bewertet_auch_das_andere_symbol(tmp_path):
         start_of_day_equity=Decimal("10000"), next_candle=bnb_kerze,
     )
     assert gekauft.status == "filled"
-    bnb_menge = ctx.ledger.position("BNBUSDC").qty
-    assert bnb_menge > Decimal("0")
+    assert ctx.ledger.position("BNBUSDC").qty > Decimal("0")
 
     schwebend = execute_proposal(
         Proposal("BTCUSDC", "BUY", 5), ctx,
@@ -452,25 +476,48 @@ def test_resolve_pending_bewertet_auch_das_andere_symbol(tmp_path):
     )
     assert schwebend.status == "pending_fill"
 
+    # Neustart nachstellen: das Ledger haelt die Position weiter (sie kaeme aus
+    # dem Journal), aber die zuletzt gesehenen Marktpreise sind weg. Das ist
+    # genau der Zustand eines frisch gestarteten Prozesses.
+    ctx.ledger._last_marks.clear()
+    assert ctx.ledger.last_marks == {}
+
     fills = resolve_pending(ctx, _candle(2_700_000))
     assert len(fills) == 1
+    assert fills[0].symbol == "BTCUSDC"
+    assert ctx.ledger.position("BNBUSDC").qty > Decimal("0")  # unangetastet
 
-    # Der eigentliche Schaden ist die FALSCHE ORDERGROESSE: size_order() bemisst
-    # gegen valuation.equity. Faellt die BNB-Position aus der Bewertung, sinkt
-    # equity von rund 10.000 auf rund 6.000, und aus 5 % werden statt ~500 USDC
-    # nur noch ~300 USDC. Deshalb wird hier die Groesse geprueft, nicht nur die
-    # Tatsache eines Fills.
-    assert fills[0].gross_quote > Decimal("450"), (
-        f"Order zu klein ({fills[0].gross_quote} USDC): die BNB-Position ist aus "
-        f"der Bewertung gefallen (Scheinverlust)"
-    )
 
-    # Die Identitaet muss ueber beide Symbole aufgehen -- die BNB-Position ist
-    # nicht aus der Equity gefallen.
-    v = ctx.ledger.mark({"BNBUSDC": bnb_preis, "BTCUSDC": Decimal("81287.03")}, ts_ms=2_700_000)
-    erwartet = v.cash + bnb_menge * bnb_preis + ctx.ledger.position("BTCUSDC").qty * Decimal("81287.03")
-    assert v.equity - erwartet == Decimal("0")
-    assert v.equity > Decimal("9000")  # kein Scheinverlust in der Groessenordnung der BNB-Position
+def test_resolve_pending_prueft_den_kill_switch_erneut(tmp_path):
+    """Die einzige Ausnahme von der Paritaet, und sie ist eine Sicherheitsfunktion.
+
+    Zwei Messpunkte an derselben Konstruktion: mit ausgeschaltetem Kill Switch
+    fuellt der Vorschlag, mit eingeschaltetem nicht. Ohne den zweiten Punkt
+    waere ein resolve_pending(), das grundsaetzlich nichts mehr bucht, ebenfalls
+    gruen.
+    """
+    for kill, erwartete_fills, erwarteter_code in ((False, 1, None), (True, 0, "KILL_SWITCH")):
+        ctx = _ctx(tmp_path / f"ks-{kill}")
+        pending = execute_proposal(
+            Proposal("BTCUSDC", "BUY", 8), ctx, marks={}, ts_ms=900_000,
+            ref_price=Decimal("81287.03"), start_of_day_equity=Decimal("10000"),
+            next_candle=None,
+        )
+        assert pending.status == "pending_fill"
+
+        ctx.kill_switch = kill  # zwischen Entscheidung und Ausfuehrung ausgeloest
+        fills = resolve_pending(ctx, _candle(1_800_000))
+        assert len(fills) == erwartete_fills, f"kill_switch={kill}"
+        anzahl = ctx.conn.execute("SELECT COUNT(*) c FROM fills").fetchone()["c"]
+        assert anzahl == erwartete_fills
+        if erwarteter_code is not None:
+            row = ctx.conn.execute(
+                "SELECT approved, risk_code, pending_since_ms FROM decisions WHERE id=?",
+                (pending.decision_id,),
+            ).fetchone()
+            assert row["risk_code"] == erwarteter_code
+            assert row["approved"] == 0
+            assert row["pending_since_ms"] is None
 
 
 def test_a6_ablehnungen_stehen_nicht_als_genehmigt_im_journal(tmp_path):

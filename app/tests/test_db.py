@@ -9,7 +9,7 @@ from aitra import db
 def test_migration_2_erzeugt_alle_neuen_tabellen(tmp_path: Path):
     conn = db.connect(tmp_path / "a.db")
     version = db.migrate(conn)
-    assert version == 3
+    assert version == 4
     tables = {r["name"] for r in conn.execute(
         "SELECT name FROM sqlite_master WHERE type='table'"
     ).fetchall()}
@@ -31,7 +31,7 @@ def test_migration_bewahrt_bestehende_decisions_a15(tmp_path: Path):
         for r in conn.execute("SELECT symbol, action, reason FROM decisions").fetchall()
     )
     version = db.migrate(conn)
-    assert version == 3
+    assert version == 4
     assert conn.execute("SELECT COUNT(*) c FROM decisions").fetchone()["c"] == 3
     after = sorted(
         (r["symbol"], r["action"], r["reason"])
@@ -54,10 +54,40 @@ def test_migration_3_ist_nachtraeglich_und_nullbar(tmp_path: Path):
     conn.execute("UPDATE decisions SET pending_since_ms = 900000 WHERE id = ?", (did,))
     conn.commit()
 
-    assert db.migrate(conn) == 3
+    assert db.migrate(conn) == 4
     row = conn.execute(
         "SELECT reason, pending_since_ms, pending_ref_price FROM decisions WHERE id = ?", (did,)
     ).fetchone()
     assert row["reason"] == "alt"
     assert row["pending_since_ms"] == 900000
     assert row["pending_ref_price"] is None  # nullbar, Bestandszeile unberuehrt
+
+
+def test_migration_4_ist_nachtraeglich_und_nullbar(tmp_path: Path):
+    """Migration 4 (pending_base_qty) laeuft auf einer DB, die auf Version 3 steht
+    und eine schwebende Zeile enthaelt. Die neue Spalte ist nullbar; die
+    Bestandszeile behaelt ihren pending_ref_price und bekommt NULL als Menge -
+    execute.resolve_pending() lehnt sie spaeter mit NO_BASE_QTY ab, statt sie
+    still falsch zu bemessen."""
+    conn = db.connect(tmp_path / "a.db")
+    for sql in db.MIGRATIONS[:3]:
+        conn.executescript(sql)
+    conn.execute("CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL)")
+    conn.execute("INSERT INTO schema_version (version) VALUES (3)")
+    conn.commit()
+    did = db.add_decision(conn, symbol="BTCUSDC", action="BUY", reason="alt", approved=1)
+    conn.execute(
+        "UPDATE decisions SET pending_since_ms = 900000, pending_ref_price = '81287.03000000' "
+        "WHERE id = ?", (did,),
+    )
+    conn.commit()
+
+    assert db.migrate(conn) == 4
+    row = conn.execute(
+        "SELECT reason, pending_since_ms, pending_ref_price, pending_base_qty "
+        "FROM decisions WHERE id = ?", (did,),
+    ).fetchone()
+    assert row["reason"] == "alt"
+    assert row["pending_since_ms"] == 900000
+    assert row["pending_ref_price"] == "81287.03000000"
+    assert row["pending_base_qty"] is None
