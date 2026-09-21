@@ -345,10 +345,80 @@ def test_final_equity_und_benchmark_von_hand_nachgerechnet():
     assert result.benchmark_final_equity == Decimal("12100")
 
 
+# 2024-01-01T00:00:00Z in ms -- A-12 verlangt Kerzen aus dem Kalenderjahr 2024,
+# also Daten, die im Livebetrieb laengst als veraltet gelten wuerden.
+_2024_START_MS = 1_704_067_200_000
+
+
+def _candles_2024(n: int) -> list[Candle]:
+    """Wie _candles(), aber mit Zeitstempeln aus dem Kalenderjahr 2024 (A-12)."""
+    return [
+        Candle(symbol=c.symbol, interval=c.interval,
+               open_time=_2024_START_MS + c.open_time,
+               close_time=_2024_START_MS + c.close_time,
+               open=c.open, high=c.high, low=c.low, close=c.close,
+               volume=c.volume, closed=True)
+        for c in _candles(n)
+    ]
+
+
 def test_a12_zeitraffer_nutzt_nur_simclock():
+    """A-12, Fix-Welle (Review-Befund 9).
+
+    Vorher prueften hier nur zwei Abwesenheiten von Zeichenketten. Ein solcher
+    Test bestuende auch bei leerer Datei -- er misst kein Verhalten. Ergaenzt
+    sind deshalb eine positive Kontrolle (die Datei enthaelt wirklich SimClock,
+    der Pfad stimmt also und die Datei ist nicht leer) und ein echter Lauf ueber
+    Kerzen aus dem Kalenderjahr 2024.
+    """
     text = Path(__file__).resolve().parent.parent.joinpath("aitra", "replay.py").read_text()
+    assert "SimClock" in text  # positive Kontrolle: die Datei existiert und ist nicht leer
     assert "WallClock" not in text
     assert "staleness(" not in text
+
+    candles = _candles_2024(800)
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+
+    def decide_fn(history):
+        return (Proposal("BTCUSDC", "BUY", position_pct=1) if len(history) % 50 == 0
+                else Proposal("BTCUSDC", "WAIT"))
+
+    result = run_replay(candles, decide_fn, CFG, SPECS, fee_bps=10.0, slippage_bps=5.0,
+                         benchmark_symbol="BTCUSDC", run_id="test-a12-2024", conn=conn)
+
+    # Ueber ein Jahr alte Kerzen loesen im Zeitraffer nichts aus, und der Lauf
+    # handelt tatsaechlich -- ein stillstehender Lauf waere keine Messung.
+    assert result.kill_switch_engagements == 0
+    assert len(result.fills) > 0
+    assert result.benchmark_bought is True
+    stale = conn.execute(
+        "SELECT COUNT(*) c FROM events WHERE event = 'MARKET_DATA_STALE'"
+    ).fetchone()["c"]
+    assert stale == 0
+
+
+@pytest.mark.slow
+def test_a12_voller_jahreslauf_2024_loest_nie_veraltet_aus():
+    """A-12 in der von der Spec geforderten Groesse: 35.040 Kerzen aus dem
+    Kalenderjahr 2024. Als `slow` gefuehrt, weil build.sh ein Budget von 12 s
+    hat (dieselbe Begruendung wie bei A-9)."""
+    candles = _candles_2024(35_040)
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+
+    def decide_fn(history):
+        return (Proposal("BTCUSDC", "BUY", position_pct=1) if len(history) % 1000 == 0
+                else Proposal("BTCUSDC", "WAIT"))
+
+    result = run_replay(candles, decide_fn, CFG, SPECS, fee_bps=10.0, slippage_bps=5.0,
+                         benchmark_symbol="BTCUSDC", run_id="test-a12-jahr", conn=conn)
+    assert result.decisions == 35_039
+    assert result.kill_switch_engagements == 0
+    assert len(result.fills) > 0
+    assert conn.execute(
+        "SELECT COUNT(*) c FROM events WHERE event = 'MARKET_DATA_STALE'"
+    ).fetchone()["c"] == 0
 
 
 def test_a12b_tagesverlustlimit_blockiert_nur_den_tag_nicht_den_lauf():
