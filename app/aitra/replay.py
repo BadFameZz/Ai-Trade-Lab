@@ -18,7 +18,7 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Callable, Mapping, Sequence
 
-from . import config, db, money, store
+from . import config, db, money, store, store_run
 from .benchmark import BuyAndHold
 from .config import Config
 from .execute import ExecutionContext, execute_proposal
@@ -94,8 +94,8 @@ def run_replay(
         conn.row_factory = sqlite3.Row
     db.migrate(conn)
     bench_run_id = f"bench-{run_id}"
-    store.create_run(conn, run_id, "replay", db.now(), "0.3.0")
-    store.create_run(conn, bench_run_id, "benchmark", db.now(), "0.3.0")
+    store_run.create_run(conn, run_id, "replay", db.now(), "0.3.0")
+    store_run.create_run(conn, bench_run_id, "benchmark", db.now(), "0.3.0")
 
     ledger = Ledger(starting_cash=cfg.starting_balance, specs=specs, fee_bps=fee_bps, slippage_bps=slippage_bps)
     clock = SimClock(candles[0].close_time)
@@ -110,7 +110,7 @@ def run_replay(
     kill_switch_engagements = 0
     sod_equity = ledger.mark({symbol: candles[0].close}, ts_ms=candles[0].close_time).equity
     fills: list[Fill] = []
-    punkte: list[store.EquityPoint] = []
+    punkte: list[store_run.EquityPoint] = []
     decisions = 0
 
     for t in range(1, len(candles)):
@@ -146,16 +146,16 @@ def run_replay(
         # Vielfaches des Schreibens selbst, und genau eine solche benutzt ein
         # Trainingslauf in Teilprojekt C.
         v = ledger.mark(marks, ts_ms=current.close_time)
-        punkte.append(store.EquityPoint(
+        punkte.append(store_run.EquityPoint(
             run_id=run_id, ts_ms=current.close_time, equity=v.equity, cash=v.cash,
             benchmark_equity=bench.equity(marks, ts_ms=current.close_time),
             exposure_pct=v.exposure_pct,
         ))
         if len(punkte) >= _EQUITY_BLOCK:
-            store.append_equity_points(conn, punkte)
+            store_run.append_equity_points(conn, punkte)
             punkte.clear()
 
-    store.append_equity_points(conn, punkte)  # Restblock
+    store_run.append_equity_points(conn, punkte)  # Restblock
     punkte.clear()
 
     final_marks = {symbol: candles[-1].close}
@@ -163,11 +163,11 @@ def run_replay(
     bench_equity = bench.equity(final_marks, ts_ms=candles[-1].close_time)
 
     # Spec 9.2: beide Laeufe werden abgeschlossen. Ohne diesen Aufruf hatte
-    # store.finish_run() im gesamten Produktivcode keinen Aufrufer, und jeder
+    # store_run.finish_run() im gesamten Produktivcode keinen Aufrufer, und jeder
     # Lauf blieb in runs.finished_at fuer immer offen.
     abschluss = db.now()
-    store.finish_run(conn, run_id, abschluss)
-    store.finish_run(conn, bench_run_id, abschluss)
+    store_run.finish_run(conn, run_id, abschluss)
+    store_run.finish_run(conn, bench_run_id, abschluss)
 
     if own_conn:
         conn.close()

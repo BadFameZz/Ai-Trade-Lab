@@ -77,9 +77,10 @@ class SymbolSpec:
         return CTX.add(self.min_notional, CTX.multiply(self.step_size, price))
 
 
-# Am 2026-09-20 von api.binance.com/api/v3/exchangeInfo abgelesen.
-# binance.py (Plan A2) ueberschreibt sie zur Laufzeit; hier stehen sie, damit
-# A1 vollstaendig ohne Netz testbar ist.
+# BTCUSDC am 2026-09-20, BNBUSDC am 2026-09-21 von
+# api.binance.com/api/v3/exchangeInfo abgelesen.
+# binance.py (Aufgabe 3) ueberschreibt sie zur Laufzeit ueber store.upsert_symbol_spec;
+# hier stehen sie, damit die Engine vollstaendig ohne Netz testbar bleibt.
 BUILTIN_SPECS: dict[str, SymbolSpec] = {
     "BTCUSDC": SymbolSpec(
         symbol="BTCUSDC", base="BTC", quote="USDC",
@@ -87,10 +88,10 @@ BUILTIN_SPECS: dict[str, SymbolSpec] = {
         min_qty=Decimal("0.00001"), min_notional=Decimal("5"),
         base_precision=8, quote_precision=8,
     ),
-    "ETHUSDC": SymbolSpec(
-        symbol="ETHUSDC", base="ETH", quote="USDC",
-        tick_size=Decimal("0.01"), step_size=Decimal("0.0001"),
-        min_qty=Decimal("0.0001"), min_notional=Decimal("5"),
+    "BNBUSDC": SymbolSpec(
+        symbol="BNBUSDC", base="BNB", quote="USDC",
+        tick_size=Decimal("0.01"), step_size=Decimal("0.001"),
+        min_qty=Decimal("0.001"), min_notional=Decimal("5"),
         base_precision=8, quote_precision=8,
     ),
 }

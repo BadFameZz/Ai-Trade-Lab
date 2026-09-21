@@ -8,7 +8,7 @@ from unittest.mock import patch
 
 import pytest
 
-from aitra import db, money, store
+from aitra import db, money, store_run
 from aitra.config import Config
 from aitra.execute import ExecutionContext, execute_proposal, expire_stale_pending, resolve_pending
 from aitra.ledger import Ledger
@@ -16,7 +16,7 @@ from aitra.marketdata import Candle, SimClock
 from aitra.risk import Proposal, RiskEngine
 
 BTC = money.BUILTIN_SPECS["BTCUSDC"]
-SPECS = {"BTCUSDC": BTC, "ETHUSDC": money.BUILTIN_SPECS["ETHUSDC"]}
+SPECS = {"BTCUSDC": BTC, "BNBUSDC": money.BUILTIN_SPECS["BNBUSDC"]}
 
 
 def _install_apply_guard():
@@ -60,7 +60,7 @@ def _install_apply_guard():
 def _ctx(tmp_path: Path, clock_ms: int = 900_000, kill_switch: bool = False) -> ExecutionContext:
     conn = db.connect(tmp_path / "a.db")
     db.migrate(conn)
-    store.create_run(conn, "run-1", "replay", "2026-01-01T00:00:00Z", "0.3.0")
+    store_run.create_run(conn, "run-1", "replay", "2026-01-01T00:00:00Z", "0.3.0")
     ledger = Ledger(starting_cash=Decimal("10000"), specs=SPECS, fee_bps=10.0, slippage_bps=5.0)
     cfg = Config(Decimal("10000"), 10, 2, 50, tmp_path, "x" * 32)
     engine = RiskEngine(cfg)
@@ -116,24 +116,24 @@ def test_a6_daily_loss_und_mode_abdeckung(tmp_path):
 def test_a6_max_exposure_neunter_ablehnungscode(tmp_path):
     """Deckt den neunten und letzten Ablehnungscode aus risk.py ab (9/9, A-6)."""
     ctx = _ctx(tmp_path)
-    # Aufbau einer grossen ETH-Position braucht vorübergehend ein grosszuegiges Limit,
+    # Aufbau einer grossen BNB-Position braucht vorübergehend ein grosszuegiges Limit,
     # sonst greift schon MAX_POSITION statt MAX_EXPOSURE.
     ctx.engine = RiskEngine(Config(Decimal("10000"), 90, 2, 90, tmp_path, "x" * 32))
-    eth_candle = Candle(symbol="ETHUSDC", interval="15m", open_time=1_800_000, close_time=2_699_999,
-                         open=Decimal("2631.77"), high=Decimal("2631.77"), low=Decimal("2631.77"),
-                         close=Decimal("2631.77"), volume=Decimal("1"), closed=True)
-    r0 = execute_proposal(Proposal("ETHUSDC", "BUY", 45), ctx, marks={}, ts_ms=900_000,
-                           ref_price=Decimal("2631.77"), start_of_day_equity=Decimal("10000"),
-                           next_candle=eth_candle)
+    bnb_candle = Candle(symbol="BNBUSDC", interval="15m", open_time=1_800_000, close_time=2_699_999,
+                         open=Decimal("789.71"), high=Decimal("789.71"), low=Decimal("789.71"),
+                         close=Decimal("789.71"), volume=Decimal("1"), closed=True)
+    r0 = execute_proposal(Proposal("BNBUSDC", "BUY", 45), ctx, marks={}, ts_ms=900_000,
+                           ref_price=Decimal("789.71"), start_of_day_equity=Decimal("10000"),
+                           next_candle=bnb_candle)
     assert r0.status == "filled"
 
     # Zurueck zur Standardkonfiguration (max_total_exposure_pct=50) fuer die eigentliche Messung
     ctx.engine = RiskEngine(Config(Decimal("10000"), 10, 2, 50, tmp_path, "x" * 32))
-    r1 = execute_proposal(Proposal("BTCUSDC", "BUY", 8), ctx, marks={"ETHUSDC": Decimal("2631.77")},
+    r1 = execute_proposal(Proposal("BTCUSDC", "BUY", 8), ctx, marks={"BNBUSDC": Decimal("789.71")},
                            ts_ms=2_700_000, ref_price=Decimal("81287.03"),
                            start_of_day_equity=Decimal("10000"))
     assert r1.code == "MAX_EXPOSURE"
-    assert ctx.conn.execute("SELECT COUNT(*) c FROM fills").fetchone()["c"] == 1  # nur der ETH-Fill
+    assert ctx.conn.execute("SELECT COUNT(*) c FROM fills").fetchone()["c"] == 1  # nur der BNB-Fill
 
 
 def test_a6b_ledger_apply_hat_genau_einen_aufrufer():
@@ -274,7 +274,7 @@ def test_a14_rekonstruktion_aus_dem_journal_1000_fills(tmp_path):
         i += 1
         assert i <= 20_000, "zu viele Versuche ohne 1.000 Fills - Testaufbau pruefen"
 
-    fills = store.get_fills(ctx.conn, "run-1")
+    fills = store_run.get_fills(ctx.conn, "run-1")
     assert len(fills) == 1000
 
     cash = Decimal("10000")
@@ -299,7 +299,7 @@ def test_a14_rekonstruktion_aus_dem_journal_1000_fills(tmp_path):
     # vergleicht sie eine unendlich genaue Zahl mit einer bewusst gerundeten.
     avg_price = money.from_text(money.to_text(avg_price, money.DP))
 
-    positions = store.get_positions(ctx.conn, "run-1")
+    positions = store_run.get_positions(ctx.conn, "run-1")
     assert qty - positions["BTCUSDC"]["qty"] == Decimal("0")
     assert avg_price - positions["BTCUSDC"]["avg_price"] == Decimal("0")
     assert cash - fills[-1]["cash_after"] == Decimal("0")
@@ -394,11 +394,11 @@ def test_a2_kasse_und_mengen_nichtnegativ_ueber_execute_proposal(tmp_path):
     # die uebrigen Schranken hier bewusst aufgezogen, damit die Kasse die
     # einzige verbliebene Grenze ist.
     ctx.engine = RiskEngine(Config(Decimal("10000"), 100, 100, 10_000, tmp_path, "x" * 32))
-    basispreise = {"BTCUSDC": Decimal("81287.03"), "ETHUSDC": Decimal("2631.77")}
+    basispreise = {"BTCUSDC": Decimal("81287.03"), "BNBUSDC": Decimal("789.71")}
     fills = 0
     for i in range(400):
         marks = {s: basispreise[s] + Decimal(i % 50) * SPECS[s].tick_size for s in basispreise}
-        symbol = "BTCUSDC" if i % 2 == 0 else "ETHUSDC"
+        symbol = "BTCUSDC" if i % 2 == 0 else "BNBUSDC"
         preis = marks[symbol]
         seite = "BUY" if i % 3 != 2 else "SELL"
         ts = (i + 1) * 900_000
@@ -428,26 +428,26 @@ def test_resolve_pending_bewertet_auch_das_andere_symbol(tmp_path):
     """Fix-Welle, Review-Befund 5: resolve_pending() markierte nur das Symbol
     der eintreffenden Kerze. Bei zwei gehaltenen Positionen fiel die andere aus
     der Equity -- ein Scheinverlust, der ueber to_portfolio_state() bis in die
-    Tagesverlustgrenze durchschlaegt. Hier wird eine grosse ETH-Position
+    Tagesverlustgrenze durchschlaegt. Hier wird eine grosse BNB-Position
     gehalten, waehrend ein BTC-Vorschlag schwebt und eine BTC-Kerze eintrifft.
     """
     ctx = _ctx(tmp_path)
     ctx.engine = RiskEngine(Config(Decimal("10000"), 100, 100, 100, tmp_path, "x" * 32))
-    eth_preis = Decimal("2631.77")
-    eth_kerze = Candle(symbol="ETHUSDC", interval="15m", open_time=900_000, close_time=1_799_999,
-                        open=eth_preis, high=eth_preis, low=eth_preis, close=eth_preis,
+    bnb_preis = Decimal("789.71")
+    bnb_kerze = Candle(symbol="BNBUSDC", interval="15m", open_time=900_000, close_time=1_799_999,
+                        open=bnb_preis, high=bnb_preis, low=bnb_preis, close=bnb_preis,
                         volume=Decimal("1"), closed=True)
     gekauft = execute_proposal(
-        Proposal("ETHUSDC", "BUY", 40), ctx, marks={}, ts_ms=900_000, ref_price=eth_preis,
-        start_of_day_equity=Decimal("10000"), next_candle=eth_kerze,
+        Proposal("BNBUSDC", "BUY", 40), ctx, marks={}, ts_ms=900_000, ref_price=bnb_preis,
+        start_of_day_equity=Decimal("10000"), next_candle=bnb_kerze,
     )
     assert gekauft.status == "filled"
-    eth_menge = ctx.ledger.position("ETHUSDC").qty
-    assert eth_menge > Decimal("0")
+    bnb_menge = ctx.ledger.position("BNBUSDC").qty
+    assert bnb_menge > Decimal("0")
 
     schwebend = execute_proposal(
         Proposal("BTCUSDC", "BUY", 5), ctx,
-        marks={"ETHUSDC": eth_preis}, ts_ms=1_800_000, ref_price=Decimal("81287.03"),
+        marks={"BNBUSDC": bnb_preis}, ts_ms=1_800_000, ref_price=Decimal("81287.03"),
         start_of_day_equity=Decimal("10000"), next_candle=None,
     )
     assert schwebend.status == "pending_fill"
@@ -456,21 +456,21 @@ def test_resolve_pending_bewertet_auch_das_andere_symbol(tmp_path):
     assert len(fills) == 1
 
     # Der eigentliche Schaden ist die FALSCHE ORDERGROESSE: size_order() bemisst
-    # gegen valuation.equity. Faellt die ETH-Position aus der Bewertung, sinkt
+    # gegen valuation.equity. Faellt die BNB-Position aus der Bewertung, sinkt
     # equity von rund 10.000 auf rund 6.000, und aus 5 % werden statt ~500 USDC
     # nur noch ~300 USDC. Deshalb wird hier die Groesse geprueft, nicht nur die
     # Tatsache eines Fills.
     assert fills[0].gross_quote > Decimal("450"), (
-        f"Order zu klein ({fills[0].gross_quote} USDC): die ETH-Position ist aus "
+        f"Order zu klein ({fills[0].gross_quote} USDC): die BNB-Position ist aus "
         f"der Bewertung gefallen (Scheinverlust)"
     )
 
-    # Die Identitaet muss ueber beide Symbole aufgehen -- die ETH-Position ist
+    # Die Identitaet muss ueber beide Symbole aufgehen -- die BNB-Position ist
     # nicht aus der Equity gefallen.
-    v = ctx.ledger.mark({"ETHUSDC": eth_preis, "BTCUSDC": Decimal("81287.03")}, ts_ms=2_700_000)
-    erwartet = v.cash + eth_menge * eth_preis + ctx.ledger.position("BTCUSDC").qty * Decimal("81287.03")
+    v = ctx.ledger.mark({"BNBUSDC": bnb_preis, "BTCUSDC": Decimal("81287.03")}, ts_ms=2_700_000)
+    erwartet = v.cash + bnb_menge * bnb_preis + ctx.ledger.position("BTCUSDC").qty * Decimal("81287.03")
     assert v.equity - erwartet == Decimal("0")
-    assert v.equity > Decimal("9000")  # kein Scheinverlust in der Groessenordnung der ETH-Position
+    assert v.equity > Decimal("9000")  # kein Scheinverlust in der Groessenordnung der BNB-Position
 
 
 def test_a6_ablehnungen_stehen_nicht_als_genehmigt_im_journal(tmp_path):
@@ -560,7 +560,7 @@ def test_journal_fill_rollt_bei_fehler_auf_dem_dritten_schreibvorgang_zurueck(tm
     commit() ihn doch noch auf die Platte schreibt."""
     ctx = _ctx(tmp_path)
     kerze = _candle(1_800_000)
-    with patch("aitra.execute.store.upsert_position", side_effect=RuntimeError("defekt")):
+    with patch("aitra.execute.store_run.upsert_position", side_effect=RuntimeError("defekt")):
         with pytest.raises(RuntimeError, match="defekt"):
             execute_proposal(
                 Proposal("BTCUSDC", "BUY", 5), ctx, marks={}, ts_ms=900_000,

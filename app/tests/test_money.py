@@ -50,9 +50,33 @@ def test_effektive_mindestorder_liegt_ueber_min_notional():
     assert Decimal("5.81") < eff < Decimal("5.82")
 
 
-def test_builtin_specs_kennen_beide_symbole():
-    for sym in ("BTCUSDC", "ETHUSDC"):
+def test_builtin_specs_kennen_btcusdc_und_bnbusdc():
+    """Der Nutzer handelt BTC/USDC und BNB/USDC. ETHUSDC ist raus - und muss
+    raus sein, sonst bemisst ein Lauf gegen eine Losgroesse, die niemand handelt."""
+    assert set(money.BUILTIN_SPECS) == {"BTCUSDC", "BNBUSDC"}
+    for sym in ("BTCUSDC", "BNBUSDC"):
         spec = money.BUILTIN_SPECS[sym]
         assert spec.quote == "USDC"
         assert spec.min_notional == Decimal("5")
         assert spec.tick_size > 0 and spec.step_size > 0
+        assert spec.base_precision == 8 and spec.quote_precision == 8
+
+
+def test_bnbusdc_losgroesse_am_2026_09_21_abgefragt():
+    """Die vier Filterwerte, am 2026-09-21 von Binance abgefragt (Planungskopf).
+
+    stepSize ist 0,001 - nicht 0,0001 wie bei ETHUSDC. Genau diese Zahl bestimmt
+    ueber effective_min_notional die kleinste garantiert durchgehende Order.
+    """
+    spec = money.BUILTIN_SPECS["BNBUSDC"]
+    assert spec.base == "BNB" and spec.quote == "USDC"
+    assert spec.tick_size == Decimal("0.01")
+    assert spec.step_size == Decimal("0.001")
+    assert spec.min_qty == Decimal("0.001")
+    assert spec.min_notional == Decimal("5")
+
+    # Preis am 2026-09-21: 789,71 USDC
+    eff = spec.effective_min_notional(Decimal("789.71"))
+    assert eff == Decimal("5") + Decimal("0.001") * Decimal("789.71")
+    assert eff == Decimal("5.78971")
+    assert Decimal("5.78") < eff < Decimal("5.79")

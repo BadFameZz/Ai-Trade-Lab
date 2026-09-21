@@ -88,3 +88,34 @@ def test_bestandskonstruktion_bleibt_positional_gueltig(tmp_path):
     cfg = Config(100, 10, 2, 50, tmp_path, "x" * 32)
     assert cfg.starting_balance == 100
     assert cfg.binance_base_url == "https://api.binance.com"
+
+
+def test_market_symbols_vorgabe_ist_btc_und_bnb(monkeypatch, tmp_path):
+    """Die Vorgabe muss zu BUILTIN_SPECS passen - ein Symbol ohne Spec fuehrt
+    zur Laufzeit zu Rejection(NO_SPEC) statt zu einem Fehler beim Start."""
+    from aitra import money
+    monkeypatch.setenv("DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("ADMIN_TOKEN", "x" * 32)
+    monkeypatch.delenv("MARKET_SYMBOLS", raising=False)
+    cfg = load()
+    assert cfg.market_symbols == ("BTCUSDC", "BNBUSDC")
+    assert all(s in money.BUILTIN_SPECS for s in cfg.market_symbols)
+
+
+def test_market_symbols_aus_der_umgebung_und_grenzen(monkeypatch, tmp_path):
+    monkeypatch.setenv("DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("ADMIN_TOKEN", "x" * 32)
+    monkeypatch.setenv("MARKET_SYMBOLS", " btcusdc , bnbusdc ")
+    assert load().market_symbols == ("BTCUSDC", "BNBUSDC")
+
+    monkeypatch.setenv("MARKET_SYMBOLS", "BTC/USDC")
+    with pytest.raises(ConfigError):
+        load()
+
+    monkeypatch.setenv("MARKET_SYMBOLS", "")
+    with pytest.raises(ConfigError):
+        load()
+
+    monkeypatch.setenv("MARKET_SYMBOLS", "A1USDC,A2USDC,A3USDC,A4USDC,A5USDC,A6USDC")
+    with pytest.raises(ConfigError):
+        load()

@@ -70,12 +70,12 @@ Alles hier Genannte ist aus dem Code oder live von der Binance-API gelesen, nich
 |---|---|---|
 | BTCUSDC Status | `TRADING` | `GET /api/v3/exchangeInfo?symbol=BTCUSDC` |
 | BTCUSDC `tickSize` / `stepSize` / `minQty` / `minNotional` | `0.01` / `0.00001` / `0.00001` / `5.00` (`applyMinToMarket: true`) | ebd. |
-| ETHUSDC `tickSize` / `stepSize` / `minQty` / `minNotional` | `0.01` / `0.0001` / `0.0001` / `5.00` | `GET /api/v3/exchangeInfo?symbol=ETHUSDC` |
+| BNBUSDC `tickSize` / `stepSize` / `minQty` / `minNotional` | `0.01` / `0.001` / `0.001` / `5.00` | `GET /api/v3/exchangeInfo?symbol=BNBUSDC`, abgefragt 2026-09-21 |
 | Präzision Basis/Quote (beide Paare) | 8 / 8 | ebd. |
 | BTCUSDC Bid/Ask | `81287.03` / `81287.04` → Spanne 0,01 USDC = **0,123 bp**, Halb-Spanne 0,062 bp | `GET /api/v3/ticker/bookTicker` |
 | BTCUSDC Tiefe an der Spitze | `askQty 0.23863 BTC ≈ 19.400 USDC` | ebd. |
-| ETHUSDC Bid/Ask | `2631.77` / `2631.78` → Spanne 0,01 USDC = **0,038 bp**, Halb-Spanne 0,019 bp | `GET /api/v3/ticker/bookTicker` |
-| ETHUSDC Tiefe an der Spitze | `askQty 15.5725 ETH ≈ 40.977 USDC` | ebd. |
+| BNBUSDC Bid/Ask | `789.70` / `789.71` → Spanne 0,01 USDC = **0,127 bp**, Halb-Spanne 0,063 bp | `GET /api/v3/ticker/bookTicker` |
+| BNBUSDC Tiefe an der Spitze | nicht neu erhoben — BNBUSDC-Tiefe am 2026-09-21 nicht abgefragt; K-4 stützt sich auf BTCUSDC | — |
 | Gewicht `GET /api/v3/klines` | **2**, `limit` max 1000, Vorgabe 500 | Binance Spot REST-Doku |
 | Kerzen-Feldreihenfolge | 12 Felder: openTime, open, high, low, close, volume, closeTime, quoteVolume, trades, takerBuyBase, takerBuyQuote, ignore | ebd. |
 | IP-Limit | `REQUEST_WEIGHT 6000 / 1 min`, `RAW_REQUESTS 300000 / 5 min` | `exchangeInfo.rateLimits` |
@@ -85,7 +85,7 @@ Alles hier Genannte ist aus dem Code oder live von der Binance-API gelesen, nich
 
 ### 2.3 Die Betriebskonfiguration und was aus ihr folgt
 
-**Entschieden:** `STARTING_BALANCE = 10000` USDC · Symbole **BTCUSDC, ETHUSDC** ·
+**Entschieden:** `STARTING_BALANCE = 10000` USDC · Symbole **BTCUSDC, BNBUSDC** ·
 Intervall **15m** · `MARKET_POLL_S = 60` · `MAX_POSITION_PCT = 10` (also höchstens 1.000 USDC
 je Order).
 
@@ -104,7 +104,7 @@ Der maximale Rundungsrest ist `step_size × preis`:
 | Paar | `step × preis` | bezogen auf die größte Order (1.000 USDC) | bezogen auf das Portfolio (10.000 USDC) | bezogen auf die kleinste Order (5 USDC) |
 |---|---|---|---|---|
 | BTCUSDC | 0,8129 USDC | **0,0813 %** | 0,0081 % | 16,3 % |
-| ETHUSDC | 0,2632 USDC | **0,0263 %** | 0,0026 % | 5,3 % |
+| BNBUSDC | 0,7897 USDC (`0,001 × 789,71`) | **0,0790 %** | 0,0079 % | 15,8 % |
 
 > Die Zahl, die eine Strategie spürt, ist die **ordbezogene**: 0,0813 % bei BTCUSDC.
 > Der portfoliobezogene Wert (0,0081 %) beschreibt nichts, was jemand erlebt.
@@ -116,13 +116,13 @@ Weil die Menge immer abgerundet wird (E-002), kann eine Order, die auf genau 5,0
 nach dem Runden unter 5,00 fallen und wird dann abgelehnt. Die kleinste Zielgröße, die
 *garantiert* durchgeht, ist `min_notional + step × preis`:
 
-- **BTCUSDC: 5,82 USDC** · **ETHUSDC: 5,27 USDC**
+- **BTCUSDC: 5,82 USDC** · **BNBUSDC: 5,79 USDC**
 
 Eine abgeleitete, keine von Binance genannte Zahl. Sie gehört in die Fehlermeldung von
 `Rejection(MIN_NOTIONAL)`, damit B und C nicht im Dunkeln tappen. Kriterium A-4b misst sie.
 
 **K-4 — Reibung: Gebühren dominieren, Slippage ist Beiwerk.**
-Roundtrip-Gebühr = 20 bp. Die gemessenen Halb-Spannen sind 0,062 bp (BTC) und 0,019 bp (ETH),
+Roundtrip-Gebühr = 20 bp. Die gemessenen Halb-Spannen sind 0,062 bp (BTC) und 0,063 bp (BNB),
 die Tiefe an der Spitze (19.400 bzw. 40.977 USDC) trägt jede Order dieses Labors — auch die
 größte mit 1.000 USDC — ohne das Buch zu bewegen. Realistische Slippage ist also **rund
 0,06 bp, nicht 5 bp**. Die Vorgabe von 5 bp (Abschnitt 6.3) ist ein bewusster
@@ -183,7 +183,7 @@ Gemessen am 2026-09-21 (`wc -l app/aitra/*.py`):
 
 | Modul | Zeilen | nicht leer | Warum über 200 |
 |---|---:|---:|---|
-| `store.py` | **324** | 270 | 19 flache CRUD-Funktionen über 6 Tabellen, genau eine Verantwortung. Gewachsen um `reject_decision()` (Ablehnungen im Journal) und `EquityPoint`/`append_equity_points()` (Sammelschreiben). **Über der 300er-Marke — siehe Konflikt unten.** |
+| `store_run.py` | **208** | 178 | 14 flache CRUD-Funktionen über 5 lauf-/ledgerbezogene Tabellen (`runs`, `fills`, `positions`, `equity_curve`, die Lauf-Spalten von `decisions`), genau eine Verantwortung — die Naht zu `store.py` (Marktdaten) darunter. |
 | `replay.py` | **283** | 233 | Engine *und* CLI in einem Modul — so von Abschnitt 3.1 vorgegeben („`__main__` als CLI"). Gewachsen um `--strategie` (A-8c), Equity-Kurve, `finish_run`, `_iso_ms` (UTC). |
 | `ledger.py` | **227** | 192 | Gewachsen um die strenge `mark()` (wirft bei Position ohne Marktpreis) und `last_marks`. Fast nur Docstring, der das *Warum* trägt. |
 | `web.py` | **218** | 188 | Bestand, von der Fix-Welle nicht berührt. |
@@ -195,15 +195,13 @@ und Kommentare**, die das *Warum* einer Korrektur tragen. Diese zu kürzen, um u
 kommen, wäre das Spiel mit der Kennzahl statt Entwurfsarbeit — deshalb zählt die Regel Zeilen,
 verlangt aber eine Begründung, keine Kürzung.
 
-> **Konflikt, offen für den Orchestrator:** `store.py` liegt mit **324 Zeilen** bereits über der
-> soeben gesetzten 300er-Marke. Damit stehen sich zwei Rulings gegenüber: das aus Aufgabe 3
-> („`store.py` bleibt ungeteilt — Zweck der Regel ist Fokus, nicht die Zahl") und die neue Marke.
-> In dieser Runde wurde **nicht geteilt**: unmittelbar vor Nachprüfung und Push eine
-> Modulaufteilung vorzunehmen, von der kein A1-Kriterium profitiert, legt das ganze Risiko auf
-> die Änderung. Die Naht ist bekannt und im Aufgabe-3-Ruling bereits benannt — **Marktdaten**
-> (`candles`, `symbol_specs`) gegen **Lauf und Ledger** (`runs`, `fills`, `positions`,
-> `equity_curve`, `decisions`). *Kosten bei Irrtum:* `store.py` wächst in A2 um die
-> Poller-Zugriffe weiter und wird unhandlich; die Trennung an dieser Naht ist ein Commit.
+> **Konflikt aufgelöst in A2, Aufgabe 1.** `store.py` wurde an der hier bereits benannten Naht
+> geteilt: **Marktdaten** (`CandleRow`, `upsert_candles`, `get_candles`, `prune_candles`,
+> `upsert_symbol_spec`, `get_symbol_spec`) bleiben in `store.py` (**134 Zeilen**), alles
+> Laufbezogene (`runs`, `fills`, `positions`, `equity_curve`, die Lauf-Spalten von `decisions`)
+> wandert nach `store_run.py` (**208 Zeilen**, siehe Tabelle oben — über dem 200er-Richtwert,
+> unter der 300er-Marke). Beide liegen damit unter der harten Marke; `test_modulgroesse.py`
+> sichert das für das gesamte Verzeichnis zu, nicht nur für diese zwei Dateien.
 
 ### 3.2 Geändert
 
@@ -259,7 +257,7 @@ class SymbolSpec:
     symbol: str
     base: str; quote: str            # "BTC" / "USDC"
     tick_size: Decimal               # 0.01
-    step_size: Decimal               # 0.00001 (BTC) | 0.0001 (ETH)
+    step_size: Decimal               # 0.00001 (BTC) | 0.001 (BNB)
     min_qty: Decimal
     min_notional: Decimal            # 5
     base_precision: int              # 8
@@ -518,7 +516,7 @@ als genehmigt.
 | `STARTING_BALANCE` | **10000** | 0 < x ≤ 1.000.000 | Öffnet das handelbare Fenster von Faktor 2 auf Faktor 200 (K-1) und drückt den Losgrößenverlust der größten Order auf 0,08 % (K-2) |
 | `MARKET_INTERVAL` | **15m** | `1m 5m 15m 1h 4h 1d` | Kompromiss zwischen Wartezeit und Datenmenge: bei 1h wären es bis zu 61 min vom Klick bis zum Fill (E-006), bei 15m höchstens ~16 min. Preis: 35.040 statt 8.760 Kerzen im Jahr (K-5) |
 | `FEE_BPS` | **10** (= 0,10 %) | 0 … 100 | Gemessene Binance-Spot-Gebühr VIP 0, Maker wie Taker, ohne BNB-Rabatt |
-| `SLIPPAGE_BPS` | **5** (= 0,05 %) | 0 … 200 | **Nicht gemessen, sondern gewählt.** Die gemessenen Halb-Spannen sind 0,062 bp (BTC) und 0,019 bp (ETH); die Tiefe an der Spitze trägt auch die größte Order. 5 bp sind rund 80× die reale Reibung und ein Aufschlag von 50 % auf die dominierende Gebühr. Zweck: verhindern, dass B und C Strategien lernen, die nur in einer reibungsfreien Welt funktionieren |
+| `SLIPPAGE_BPS` | **5** (= 0,05 %) | 0 … 200 | **Nicht gemessen, sondern gewählt.** Die gemessenen Halb-Spannen sind 0,062 bp (BTC) und 0,063 bp (BNB); die Tiefe an der Spitze trägt auch die größte Order. 5 bp sind rund 80× die reale Reibung und ein Aufschlag von 50 % auf die dominierende Gebühr. Zweck: verhindern, dass B und C Strategien lernen, die nur in einer reibungsfreien Welt funktionieren |
 | `min_notional`, `step_size`, `tick_size` | aus `symbol_specs` | — | Erstbestückung aus einer eingebauten Tabelle mit den in 2.2 gemessenen Werten; `--refresh` holt sie aus `exchangeInfo`. Eingebaut statt immer online, damit Replays reproduzierbar und offline lauffähig bleiben. Die verwendete Quelle steht in `runs.params_json` |
 | `FILL_PRICE_RULE` | `next_open` | fest in A | siehe E-006 |
 
@@ -785,7 +783,7 @@ der es rot machen muss. Alle Befehle laufen aus `app/`.
 ### Buchhaltung
 
 **A-1 · Die Identität geht exakt auf.**
-10.000 Fills aus einer festen, im Test hinterlegten Sequenz (kein Zufall) auf BTCUSDC und ETHUSDC.
+10.000 Fills aus einer festen, im Test hinterlegten Sequenz (kein Zufall) auf BTCUSDC und BNBUSDC.
 Nach jedem Fill gilt `ledger.mark(marks).equity − (cash + Σ qty·mark) == Decimal("0")`;
 am Ende zusätzlich `cash_end − (cash_start − Σ net(BUY) + Σ net(SELL)) == Decimal("0")`.
 **Schwelle: Differenz exakt 0 in 10.000 von 10.000 Fällen.**
@@ -804,7 +802,7 @@ In denselben 10.000 Fills: `min(cash) ≥ 0` und `min(qty je Position) ≥ 0`, 0
 > vor der Buchung ein zweites Mal (`if net > self._cash`). Nachgemessen im Container:
 > nur den Wächter in `sizing.py` entfernt → **beide** A-2-Tests bleiben grün (der Ledger fängt
 > es ab). Erst wenn **beide** entfernt sind, entsteht `cash < 0`:
-> `A-2 verletzt: Kasse -482.74576514 < 0 bei Schritt 55 (BUY ETHUSDC, OK)`.
+> `A-2 verletzt: Kasse -482.74576514 < 0 bei Schritt 55 (BUY BNBUSDC, OK)`.
 > Das ist kein Mangel, sondern die beabsichtigte zweite Schicht — der Spec-Text beschrieb nur
 > eine davon.
 >
@@ -1118,7 +1116,7 @@ und höchstens **150 s**:
 `trades_total` bleibt 0; fünf der acht Messungen fallen.
 
 **A-19b · End-to-End, Produktionskonfiguration mit 15m-Kerzen.**
-`MARKET_SYMBOLS=BTCUSDC,ETHUSDC`, `MARKET_INTERVAL=15m`, `MARKET_POLL_S=60`.
+`MARKET_SYMBOLS=BTCUSDC,BNBUSDC`, `MARKET_INTERVAL=15m`, `MARKET_POLL_S=60`.
 Nach höchstens **150 s**: `market_data == "ok"`, `age_s ≤ 900`, `benchmark.equity` ist eine
 Zahl > 0, `points | length >= 1`, HTTP 200. Ein Fill wird hier **nicht** erwartet.
 *Rot:* Die intervallrelative Schwelle aus 8.2 entfernen → `market_data == "stale"` und HTTP 503
@@ -1247,7 +1245,7 @@ eingesetzt werden kann, ohne den Text umzuschreiben.
 | Nr. | Antwort |
 |---|---|
 | F-2 | Python bleibt **3.12** (`python:3.12-slim`); 3.13 war die Bauumgebung |
-| F-4 | **BTCUSDC und ETHUSDC**, Intervall **15m** (Fassung 2 hatte 1h); Rückfüllung 400 Tage |
+| F-4 | **BTCUSDC und BNBUSDC**, Intervall **15m** (Fassung 2 hatte 1h); Rückfüllung 400 Tage |
 | F-5 | **`STARTING_BALANCE = 10000`** — K-1 … K-3 gerechnet; Umsetzung auf Bestandscontainern über A-22 |
 | F-6 | Gebühr in **Quote-Währung (USDC), 0,10 %, kein BNB-Rabatt** |
 | F-7 | Fill auf der **Folgekerze, auch live** — bei 15m bis zu ~16 min, Verfall nach 30 min |
@@ -1405,7 +1403,7 @@ näher an der Grenze.
 |---|---|---|---|
 | `STARTING_BALANCE` | **10000** *(geändert von 100)* | 0 < x ≤ 1.000.000 | Startkapital, jetzt `Decimal`. Unterhalb von 1.200 → Startwarnung (A-22) |
 | `MARKET_DATA_ENABLED` | `false` | bool | Startet den Poller. Vorgabe aus, damit Tests nie ins Netz gehen |
-| `MARKET_SYMBOLS` | `BTCUSDC,ETHUSDC` | 1 … 5 Symbole, je gegen `SYMBOL_RE` | zu verfolgende Symbole |
+| `MARKET_SYMBOLS` | `BTCUSDC,BNBUSDC` | 1 … 5 Symbole, je gegen `SYMBOL_RE` | zu verfolgende Symbole |
 | `MARKET_INTERVAL` | **`15m`** | `1m 5m 15m 1h 4h 1d` | Kerzenintervall. Bestimmt Veraltet-Schwellen, Fill-Verzögerung und Datenmenge (K-5) |
 | `MARKET_POLL_S` | `60` | 10 … 300 | Abrufabstand; unabhängig vom Intervall |
 | `MARKET_STALE_WARN_S` | `150` | 30 … 3600 | **Untergrenze** für `warn`; wirksam ist `max(wert, 1,5·interval_s)` → bei 15m **1.350 s** |

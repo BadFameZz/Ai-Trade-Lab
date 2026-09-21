@@ -15,7 +15,7 @@ from pathlib import Path
 
 import pytest
 
-from aitra import db, money, store
+from aitra import db, money, store, store_run
 from aitra.config import Config
 from aitra.execute import ExecutionContext, execute_proposal
 from aitra.ledger import Ledger
@@ -288,7 +288,7 @@ def test_a9_tempo_35040_kerzen_dateibasierte_db(tmp_path):
     assert result.decisions == 35_039
     assert len(result.fills) > 500  # Pruefflaeche: es wird wirklich geschrieben
     # Die Kurve ist vollstaendig auf der Platte gelandet, nicht nur im Puffer.
-    assert len(store.get_equity_curve(conn, "test-a9-datei", limit=100_000)) == 35_039
+    assert len(store_run.get_equity_curve(conn, "test-a9-datei", limit=100_000)) == 35_039
     assert elapsed < 40.0, f"{elapsed:.2f} s fuer 35.039 Entscheidungen = {35_039/elapsed:.0f}/s"
     assert (tmp_path / "tempo.db").stat().st_size > 0
 
@@ -513,7 +513,7 @@ def test_a12b_gegenprobe_ohne_tagesreset_bleibt_kill_switch_aktiv():
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     db.migrate(conn)
-    store.create_run(conn, "live-sim", "live", db.now(), "0.3.0")
+    store_run.create_run(conn, "live-sim", "live", db.now(), "0.3.0")
     ledger = Ledger(starting_cash=Decimal("10000"), specs=SPECS, fee_bps=10.0, slippage_bps=5.0)
     cfg = Config(Decimal("10000"), 100, 2, 100, Path("/tmp"), "x" * 32)
     ctx = ExecutionContext(conn=conn, run_id="live-sim", ledger=ledger, engine=RiskEngine(cfg),
@@ -561,8 +561,8 @@ def test_cli_lauft_end_to_end(tmp_path):
 
 
 def test_replay_schreibt_equity_kurve_und_schliesst_beide_laeufe_ab():
-    """Fix-Welle, Review-Befund 7: store.append_equity_point() und
-    store.finish_run() hatten im gesamten Produktivcode keinen Aufrufer,
+    """Fix-Welle, Review-Befund 7: store_run.append_equity_point() und
+    store_run.finish_run() hatten im gesamten Produktivcode keinen Aufrufer,
     obwohl Spec 4.4 ("Fills und Equity-Kurve unter eigener run_id") und 9.2
     ("equity_punkt anhaengen") beides verlangen. Jeder Lauf blieb in
     runs.finished_at fuer immer offen."""
@@ -578,7 +578,7 @@ def test_replay_schreibt_equity_kurve_und_schliesst_beide_laeufe_ab():
                          benchmark_symbol="BTCUSDC", run_id="test-kurve", conn=conn)
     assert len(result.fills) > 0  # Pruefflaeche: die Kurve muss sich bewegen koennen
 
-    kurve = store.get_equity_curve(conn, "test-kurve", limit=10_000)
+    kurve = store_run.get_equity_curve(conn, "test-kurve", limit=10_000)
     # Ein Punkt je Schleifendurchlauf, also je Entscheidungskerze candles[0..n-2].
     assert len(kurve) == len(candles) - 1 == result.decisions
     assert [punkt["ts_ms"] for punkt in kurve] == [c.close_time for c in candles[:-1]]
@@ -740,9 +740,9 @@ def test_run_replay_lehnt_abweichenden_benchmark_symbol_frueh_ab():
     kein Preis mitgegeben wird, wirft tief aus ledger.py -- weit weg von der
     eigentlichen Aufrufstelle, die den Denkfehler gemacht hat. run_replay()
     muss den Widerspruch selbst und sofort melden."""
-    specs = {"BTCUSDC": money.BUILTIN_SPECS["BTCUSDC"], "ETHUSDC": money.BUILTIN_SPECS["ETHUSDC"]}
+    specs = {"BTCUSDC": money.BUILTIN_SPECS["BTCUSDC"], "BNBUSDC": money.BUILTIN_SPECS["BNBUSDC"]}
     candles = _candles(10)  # alle mit symbol="BTCUSDC"
 
     with pytest.raises(ValueError, match="benchmark_symbol"):
         run_replay(candles, _wait_fn, CFG, specs, fee_bps=10.0, slippage_bps=5.0,
-                   benchmark_symbol="ETHUSDC", run_id="test-benchmark-mismatch")
+                   benchmark_symbol="BNBUSDC", run_id="test-benchmark-mismatch")

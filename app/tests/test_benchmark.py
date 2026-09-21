@@ -5,7 +5,7 @@ from decimal import Decimal
 from pathlib import Path
 from unittest.mock import patch
 
-from aitra import db, money, store
+from aitra import db, money, store_run
 from aitra.benchmark import BuyAndHold
 from aitra.config import Config
 from aitra.marketdata import Candle, SimClock
@@ -22,7 +22,7 @@ def _candle(open_time: int, price: str) -> Candle:
 def _bench(tmp_path: Path) -> BuyAndHold:
     conn = db.connect(tmp_path / "a.db")
     db.migrate(conn)
-    store.create_run(conn, "bench-run-1", "benchmark", "2026-01-01T00:00:00Z", "0.3.0")
+    store_run.create_run(conn, "bench-run-1", "benchmark", "2026-01-01T00:00:00Z", "0.3.0")
     cfg = Config(Decimal("10000"), 10, 2, 50, tmp_path, "x" * 32)
     return BuyAndHold(cfg, conn, "bench-run-1", "BTCUSDC", BTC, fee_bps=10.0, slippage_bps=5.0,
                        clock=SimClock(0))
@@ -49,7 +49,7 @@ def test_kauft_genau_einmal_auf_der_zweiten_kerze(tmp_path):
 
     # zweiter Aufruf darf keinen weiteren Kauf ausloesen
     bench.on_candle(k2, prev_candle=k1)
-    assert store.get_fills(bench._ctx.conn, "bench-run-1").__len__() == 1
+    assert store_run.get_fills(bench._ctx.conn, "bench-run-1").__len__() == 1
 
 
 def test_equity_folgt_dem_kurs_nach_dem_kauf(tmp_path):
@@ -76,11 +76,11 @@ def test_kauft_trotz_grosser_kursluecke_notfalls_eine_kerze_spaeter(tmp_path):
     bench.on_candle(k0, prev_candle=None)
     bench.on_candle(k1, prev_candle=k0)
     assert bench.bought is False  # Marge reicht bei dieser Luecke nicht
-    assert store.get_fills(bench._ctx.conn, "bench-run-1") == []
+    assert store_run.get_fills(bench._ctx.conn, "bench-run-1") == []
 
     bench.on_candle(k2, prev_candle=k1)
     assert bench.bought is True
-    assert len(store.get_fills(bench._ctx.conn, "bench-run-1")) == 1
+    assert len(store_run.get_fills(bench._ctx.conn, "bench-run-1")) == 1
 
 
 def test_look_ahead_ref_price_ist_niemals_die_fuellkerze(tmp_path):

@@ -12,8 +12,8 @@ from aitra.ledger import Fill, Ledger, Order, Rejection, Valuation
 from aitra.marketdata import Candle
 
 BTC = money.BUILTIN_SPECS["BTCUSDC"]
-ETH = money.BUILTIN_SPECS["ETHUSDC"]
-SPECS = {"BTCUSDC": BTC, "ETHUSDC": ETH}
+BNB = money.BUILTIN_SPECS["BNBUSDC"]
+SPECS = {"BTCUSDC": BTC, "BNBUSDC": BNB}
 
 
 def _candle(open_price: str, open_time: int = 900_000, high="999999", low="1", close="0") -> Candle:
@@ -170,7 +170,7 @@ def test_buchhaltung_identitaet_a1():
     ts = 900_000
     treffer = 0
     for i in range(10_000):
-        symbol = "BTCUSDC" if i % 2 == 0 else "ETHUSDC"
+        symbol = "BTCUSDC" if i % 2 == 0 else "BNBUSDC"
         spec = SPECS[symbol]
         price = Decimal("81287.03") if symbol == "BTCUSDC" else Decimal("2631.77")
         price = price + Decimal(i % 50) * spec.tick_size
@@ -178,7 +178,7 @@ def test_buchhaltung_identitaet_a1():
         pos = ledger.position(symbol)
         if side == "SELL" and pos.qty == 0:
             side = "BUY"
-        equity_now = ledger.mark({"BTCUSDC": price, "ETHUSDC": price}, ts_ms=ts).equity
+        equity_now = ledger.mark({"BTCUSDC": price, "BNBUSDC": price}, ts_ms=ts).equity
         target_quote = equity_now * Decimal("2") / Decimal(100)
         if side == "BUY":
             # Gedeckelt auf die tatsaechlich verfuegbare Kasse, sonst laeuft
@@ -199,8 +199,8 @@ def test_buchhaltung_identitaet_a1():
             summe_net_buy += result.net_quote
         else:
             summe_net_sell += result.net_quote
-        v = ledger.mark({"BTCUSDC": price, "ETHUSDC": price}, ts_ms=ts)
-        held_value = sum(ledger.position(s).qty * price for s in ("BTCUSDC", "ETHUSDC"))
+        v = ledger.mark({"BTCUSDC": price, "BNBUSDC": price}, ts_ms=ts)
+        held_value = sum(ledger.position(s).qty * price for s in ("BTCUSDC", "BNBUSDC"))
         # Pruefung 1: tautologisch (beide Seiten aus mark()/self._cash), zeigt
         # nur, dass mark() sich selbst nicht widerspricht.
         assert v.equity - (v.cash + held_value) == Decimal("0")
@@ -223,14 +223,14 @@ def test_buchhaltung_identitaet_a1():
         # wo sizing.py die Menge bestimmt: dort schlaegt dieselbe Entfernung mit
         # "Kasse -482.74576514 < 0 bei Schritt 55" fehl.
         assert ledger.cash >= Decimal("0"), f"Kasse negativ nach Fill {treffer}: {ledger.cash}"
-        assert min(ledger.position(s).qty for s in ("BTCUSDC", "ETHUSDC")) >= Decimal("0"), (
+        assert min(ledger.position(s).qty for s in ("BTCUSDC", "BNBUSDC")) >= Decimal("0"), (
             f"Menge negativ nach Fill {treffer}: "
-            f"{[(s, ledger.position(s).qty) for s in ('BTCUSDC', 'ETHUSDC')]}"
+            f"{[(s, ledger.position(s).qty) for s in ('BTCUSDC', 'BNBUSDC')]}"
         )
     assert treffer >= 9000  # die Pruefflaeche darf nicht leer sein (gemessen: 9989/10000)
     assert ledger.cash >= Decimal("0")
     assert ledger.position("BTCUSDC").qty >= Decimal("0")
-    assert ledger.position("ETHUSDC").qty >= Decimal("0")
+    assert ledger.position("BNBUSDC").qty >= Decimal("0")
     # Pruefung 2 (Spec 12, A-1): Endkasse unabhaengig aus den Fill-net_quote-
     # Werten rekonstruiert, nicht aus self._cash - nicht tautologisch.
     rekonstruiert = cash_start - summe_net_buy + summe_net_sell
@@ -262,7 +262,7 @@ def test_mark_wirft_bei_gehaltener_position_ohne_marktpreis():
     with pytest.raises(ValueError, match="Kein Marktpreis für gehaltene Position BTCUSDC"):
         ledger.mark({}, ts_ms=1_800_000)
     with pytest.raises(ValueError, match="BTCUSDC"):
-        ledger.mark({"ETHUSDC": Decimal("2631.77")}, ts_ms=1_800_000)
+        ledger.mark({"BNBUSDC": Decimal("2631.77")}, ts_ms=1_800_000)
 
     # Mit Preis geht es unveraendert durch, und die Identitaet haelt.
     v = ledger.mark({"BTCUSDC": Decimal("82000")}, ts_ms=1_800_000)

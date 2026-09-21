@@ -91,7 +91,7 @@ class RiskEngine:
         if action == "SELL":
             # Befund B-1: gegen die Position IM SYMBOL pruefen, nicht gegen die
             # Gesamtexposition. pf.exposure_pct waere hier falsch: ein Verkauf in
-            # BTCUSDC darf nicht durchgehen, nur weil ETHUSDC genug Gesamtrisiko traegt.
+            # BTCUSDC darf nicht durchgehen, nur weil BNBUSDC genug Gesamtrisiko traegt.
             held_pct = pf.position_pct_by_symbol.get(p.symbol, 0.0)
             if p.position_pct > held_pct:
                 return RiskDecision(False, "NO_POSITION", "Verkauf größer als vorhandene Position (kein Short)")

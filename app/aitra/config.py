@@ -41,6 +41,7 @@ class Config:
     trading_mode: str = "PAPER"
     live_locked: bool = True
     binance_base_url: str = "https://api.binance.com"
+    market_symbols: tuple[str, ...] = ("BTCUSDC", "BNBUSDC")
 
 
 def _num(name: str, default: float, lo: float, hi: float) -> float:
@@ -100,6 +101,25 @@ def _narrow_trading_window(balance: Decimal, max_position_pct: float) -> bool:
     return largest_order < _NARROW_WINDOW_FACTOR * eff_min
 
 
+def _symbols(name: str = "MARKET_SYMBOLS", default: str = "BTCUSDC,BNBUSDC") -> tuple[str, ...]:
+    """1 bis 5 Symbole, je gegen SYMBOL_RE geprueft (Spec 18, Spec 11.2).
+
+    Die Pruefung passiert hier und nicht erst in der SQL-Schicht: ein Symbol,
+    das erst zur Laufzeit auffaellt, faellt im Poller-Thread auf - also dort,
+    wo niemand hinsieht.
+    """
+    from .risk import SYMBOL_RE  # lokal: risk.py importiert config.py (Zyklus)
+
+    roh = os.getenv(name, default).strip()
+    teile = tuple(s.strip().upper() for s in roh.split(",") if s.strip())
+    if not 1 <= len(teile) <= 5:
+        raise ConfigError(f"{name}={roh!r} muss 1 bis 5 Symbole nennen, hat {len(teile)}")
+    for s in teile:
+        if not SYMBOL_RE.match(s):
+            raise ConfigError(f"{name}: Symbol {s!r} ungültig")
+    return teile
+
+
 def _admin_token(data_dir: Path) -> str:
     env = os.getenv("ADMIN_TOKEN", "").strip()
     if env:
@@ -136,6 +156,8 @@ def load() -> Config:
             money.to_text(starting_balance), max_position_pct,
         )
 
+    market_symbols = _symbols()
+
     return Config(
         starting_balance=starting_balance,
         max_position_pct=max_position_pct,
@@ -144,4 +166,5 @@ def load() -> Config:
         data_dir=data_dir,
         admin_token=_admin_token(data_dir),
         binance_base_url=binance_base_url,
+        market_symbols=market_symbols,
     )

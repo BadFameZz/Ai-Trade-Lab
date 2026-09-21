@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from decimal import Decimal
 from typing import Mapping
 
-from . import db, money, store
+from . import db, money, store_run
 from .ledger import Fill, Ledger, Rejection
 from .marketdata import Candle, Clock
 from .risk import Proposal, RiskEngine
@@ -65,16 +65,16 @@ def _journal_fill(ctx: ExecutionContext, decision_id: int, fill: Fill) -> None:
     wuerde den halb gebuchten Fill doch noch persistieren.
     """
     try:
-        fill_id = store.insert_fill(
+        fill_id = store_run.insert_fill(
             ctx.conn, run_id=ctx.run_id, decision_id=decision_id, symbol=fill.symbol,
             side=fill.side, candle_open_time=fill.candle_open_time, price=fill.price,
             qty=fill.qty, gross_quote=fill.gross_quote, fee=fill.fee, net_quote=fill.net_quote,
             cash_after=fill.cash_after, fee_bps=fill.fee_bps, slippage_bps=fill.slippage_bps,
             ts=db.now(), commit=False,
         )
-        store.resolve_decision(ctx.conn, decision_id, fill_id, commit=False)
+        store_run.resolve_decision(ctx.conn, decision_id, fill_id, commit=False)
         pos = ctx.ledger.position(fill.symbol)
-        store.upsert_position(ctx.conn, run_id=ctx.run_id, symbol=fill.symbol, qty=pos.qty,
+        store_run.upsert_position(ctx.conn, run_id=ctx.run_id, symbol=fill.symbol, qty=pos.qty,
                                avg_price=pos.avg_price, realized_pnl=pos.realized_pnl,
                                updated_at=db.now(), commit=False)
     except BaseException:
@@ -122,23 +122,23 @@ def execute_proposal(
     spec = ctx.specs.get(proposal.symbol)
     if spec is None:
         grund = f"Keine SymbolSpec für {proposal.symbol}"
-        store.reject_decision(ctx.conn, decision_id, "NO_SPEC", grund)
+        store_run.reject_decision(ctx.conn, decision_id, "NO_SPEC", grund)
         return ExecutionResult(decision_id, False, "NO_SPEC", grund, status="rejected")
 
     held = ctx.ledger.position(proposal.symbol).qty
     order = size_order(proposal, valuation, spec, ref_price, ctx.fee_bps, ctx.slippage_bps, held)
     if isinstance(order, Rejection):
-        store.reject_decision(ctx.conn, decision_id, order.code, order.reason)
+        store_run.reject_decision(ctx.conn, decision_id, order.code, order.reason)
         return ExecutionResult(decision_id, False, order.code, order.reason, status="rejected")
 
     if next_candle is None:
         # E-006, live: Folgekerze liegt noch nicht vor -> schwebend
-        store.mark_decision_pending(ctx.conn, decision_id, pending_since_ms=ts_ms, ref_price=ref_price)
+        store_run.mark_decision_pending(ctx.conn, decision_id, pending_since_ms=ts_ms, ref_price=ref_price)
         return ExecutionResult(decision_id, True, "OK", "Order schwebt bis zur Folgekerze", status="pending_fill")
 
     fill = ctx.ledger.apply(order, next_candle)
     if isinstance(fill, Rejection):
-        store.reject_decision(ctx.conn, decision_id, fill.code, fill.reason)
+        store_run.reject_decision(ctx.conn, decision_id, fill.code, fill.reason)
         return ExecutionResult(decision_id, False, fill.code, fill.reason, status="rejected")
 
     _journal_fill(ctx, decision_id, fill)
@@ -157,12 +157,12 @@ def resolve_pending(ctx: ExecutionContext, candle: Candle) -> list[Fill]:
     """
     expire_stale_pending(ctx)
     filled: list[Fill] = []
-    for row in store.get_pending_decisions(ctx.conn, ctx.run_id):
+    for row in store_run.get_pending_decisions(ctx.conn, ctx.run_id):
         if row["symbol"] != candle.symbol:
             continue
         spec = ctx.specs.get(row["symbol"])
         if spec is None:
-            store.reject_decision(ctx.conn, row["id"], "NO_SPEC",
+            store_run.reject_decision(ctx.conn, row["id"], "NO_SPEC",
                                    f"Keine SymbolSpec für {row['symbol']}")
             continue
         roh_ref = row["pending_ref_price"]
@@ -172,7 +172,7 @@ def resolve_pending(ctx: ExecutionContext, candle: Candle) -> list[Fill]:
             # genau der Look-ahead, den Migration 3 beseitigt. Eigener Code,
             # nicht PENDING_EXPIRED: der Vorschlag ist nicht verfallen,
             # sondern nicht mehr bemessbar.
-            store.reject_decision(ctx.conn, row["id"], "NO_REF_PRICE",
+            store_run.reject_decision(ctx.conn, row["id"], "NO_REF_PRICE",
                                    "Kein gespeicherter Vorschlagspreis (DB vor Migration 3)")
             continue
         ref_price = money.from_text(roh_ref)
@@ -191,11 +191,11 @@ def resolve_pending(ctx: ExecutionContext, candle: Candle) -> list[Fill]:
             # Frueher PENDING_EXPIRED: ein INSUFFICIENT_CASH wurde als
             # "verfallen" etikettiert und die Ursache war aus dem Journal
             # nicht mehr lesbar.
-            store.reject_decision(ctx.conn, row["id"], order.code, order.reason)
+            store_run.reject_decision(ctx.conn, row["id"], order.code, order.reason)
             continue
         fill = ctx.ledger.apply(order, candle)
         if isinstance(fill, Rejection):
-            store.reject_decision(ctx.conn, row["id"], fill.code, fill.reason)
+            store_run.reject_decision(ctx.conn, row["id"], fill.code, fill.reason)
             continue
         _journal_fill(ctx, row["id"], fill)
         filled.append(fill)
@@ -207,8 +207,8 @@ def expire_stale_pending(ctx: ExecutionContext) -> list[int]:
     schweben — unabhaengig davon, ob je eine passende Kerze eintrifft (E-006)."""
     now = ctx.clock.now_ms()
     expired: list[int] = []
-    for row in store.get_pending_decisions(ctx.conn, ctx.run_id):
+    for row in store_run.get_pending_decisions(ctx.conn, ctx.run_id):
         if now - row["pending_since_ms"] > ctx.pending_expiry_ms:
-            store.expire_decision(ctx.conn, row["id"])
+            store_run.expire_decision(ctx.conn, row["id"])
             expired.append(row["id"])
     return expired
