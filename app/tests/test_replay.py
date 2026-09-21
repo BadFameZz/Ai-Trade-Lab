@@ -149,6 +149,16 @@ def test_a8c_gleicher_lauf_im_selben_prozess_gleicher_hash():
 
 
 def test_a8c_gleicher_lauf_in_getrennten_prozessen_gleicher_hash(tmp_path):
+    """A-8c ueber Prozessgrenzen, mit echten Fills (Fix-Welle, Review-Befund 2).
+
+    Vorher fuhr dieser Test die CLI mit der fest verdrahteten Vorgabestrategie
+    _wait_fn. Jeder Unterprozess erzeugte damit null Fills, und verglichen wurden
+    zweimal sha256("[]") == "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+    (nachgemessen). Dieser Vergleich bliebe auch dann gruen, wenn die Engine
+    ueber Prozessgrenzen hinweg beliebig nichtdeterministisch fuellte.
+    Jetzt faehrt die CLI mit --strategie takt (eingebaut, deterministisch,
+    7 Fills bei 300 Kerzen), und der Leerlauf-Hash ist ausdruecklich
+    ausgeschlossen."""
     candles = _candles(300)
     conn = db.connect(tmp_path / "seed.db")
     db.migrate(conn)
@@ -166,11 +176,17 @@ def test_a8c_gleicher_lauf_in_getrennten_prozessen_gleicher_hash(tmp_path):
     for seed in ("1", "2"):
         out = subprocess.run(
             [sys.executable, "-m", "aitra.replay", "--symbol", "BTCUSDC", "--interval", "15m",
-             "--from", from_iso, "--to", to_iso, "--db", str(tmp_path / "seed.db")],
+             "--from", from_iso, "--to", to_iso, "--db", str(tmp_path / "seed.db"),
+             "--strategie", "takt"],
             cwd=str(Path(__file__).resolve().parent.parent), capture_output=True, text=True,
             env={**os.environ, "PYTHONHASHSEED": seed, "DATA_DIR": str(tmp_path), "ADMIN_TOKEN": "x" * 32},
         )
         assert out.returncode == 0, out.stderr
+        # Mindestsicherung: der Lauf darf nicht heimlich leer sein.
+        assert out.stdout.strip() != _hash_fills([]), (
+            f"CLI-Lauf erzeugte null Fills -- verglichen wuerde nur sha256('[]'); stderr={out.stderr}"
+        )
+        assert "Fills=7 " in out.stderr, out.stderr  # 299 Entscheidungen, jede 40. -> 299 // 40
         env_hashes.add(out.stdout.strip())
     assert len(env_hashes) == 1
 

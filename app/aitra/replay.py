@@ -138,6 +138,28 @@ def _wait_fn(history: Sequence[Candle]) -> Proposal:
     return Proposal(symbol=history[-1].symbol, action="WAIT")
 
 
+def _takt_fn(history: Sequence[Candle]) -> Proposal:
+    """Eingebaute, deterministisch handelnde CLI-Strategie (A-8c).
+
+    Kauft bei jeder 40. Entscheidung 1 % des Kapitals, sonst WAIT. Haengt
+    ausschliesslich an der Laenge der Historie -- nicht an Preisen, nicht an
+    einer Uhr, nicht an Zufall. Zweck: Der Prozessgrenzen-Vergleich in A-8c
+    braucht Laeufe mit echten Fills. Mit _wait_fn erzeugt jeder CLI-Lauf null
+    Fills, und verglichen wuerden zweimal sha256("[]") -- ein Hash, der auch
+    dann gleich bliebe, wenn die Engine ueber Prozessgrenzen hinweg beliebig
+    nichtdeterministisch fuellte.
+    """
+    if len(history) % 40 == 0:
+        return Proposal(symbol=history[-1].symbol, action="BUY", position_pct=1)
+    return Proposal(symbol=history[-1].symbol, action="WAIT")
+
+
+STRATEGIEN: dict[str, Callable[[Sequence[Candle]], Proposal]] = {
+    "wait": _wait_fn,
+    "takt": _takt_fn,
+}
+
+
 def _hash_fills(fills: list[Fill]) -> str:
     """Deterministischer Fingerabdruck aller Fills, prozess- und seedunabhaengig (A-8c)."""
     payload = json.dumps(
@@ -156,6 +178,9 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     p.add_argument("--from", dest="from_", required=True, help="ISO-8601, z. B. 2025-01-01T00:00:00+00:00")
     p.add_argument("--to", required=True, help="ISO-8601")
     p.add_argument("--db", default=None, help="Pfad zur aitra.db; ohne Angabe :memory:")
+    p.add_argument("--strategie", choices=sorted(STRATEGIEN), default="wait",
+                   help="eingebaute Strategie: 'wait' (nie handeln) oder 'takt' "
+                        "(jede 40. Entscheidung 1 %% BUY, deterministisch, A-8c)")
     return p.parse_args(argv)
 
 
@@ -183,7 +208,7 @@ def main(argv: list[str] | None = None) -> int:
     # uuid4-Suffix: runs.run_id ist PRIMARY KEY; _hash_fills haengt nur von den Fills ab (A-8c).
     run_id = f"replay-{args.from_}-{args.to}-{uuid.uuid4().hex[:12]}"
     result = run_replay(
-        candles, _wait_fn, cfg, {args.symbol: spec}, fee_bps=10.0, slippage_bps=5.0,
+        candles, STRATEGIEN[args.strategie], cfg, {args.symbol: spec}, fee_bps=10.0, slippage_bps=5.0,
         benchmark_symbol=args.symbol, run_id=run_id, conn=conn,
     )
     print(_hash_fills(result.fills))
