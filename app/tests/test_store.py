@@ -109,3 +109,67 @@ def test_symbol_spec_roundtrip(tmp_path):
     store.upsert_symbol_spec(conn, spec, source="builtin", fetched_at="2026-01-01T00:00:00Z")
     back = store.get_symbol_spec(conn, "BTCUSDC")
     assert back == spec
+
+
+def test_get_fills_reihenfolge_geld_exakt_und_run_isolation(tmp_path):
+    conn = _conn(tmp_path)
+    store.create_run(conn, "run-1", "replay", "2026-01-01T00:00:00Z", "0.3.0")
+    store.create_run(conn, "run-2", "replay", "2026-01-01T00:00:00Z", "0.3.0")
+    first_id = store.insert_fill(
+        conn, run_id="run-1", decision_id=None, symbol="BTCUSDC", side="BUY",
+        candle_open_time=900_000, price=Decimal("81287.04"), qty=Decimal("0.01"),
+        gross_quote=Decimal("812.8704"), fee=Decimal("0.81287040"),
+        net_quote=Decimal("813.68327040"), cash_after=Decimal("9186.31672960"),
+        fee_bps=10.0, slippage_bps=5.0, ts="2026-01-01T00:15:00Z",
+    )
+    second_id = store.insert_fill(
+        conn, run_id="run-1", decision_id=None, symbol="BTCUSDC", side="SELL",
+        candle_open_time=1_800_000, price=Decimal("81300.12345678"), qty=Decimal("0.00500001"),
+        gross_quote=Decimal("406.50123456"), fee=Decimal("0.40650123"),
+        net_quote=Decimal("406.09473333"), cash_after=Decimal("9592.41146293"),
+        fee_bps=10.0, slippage_bps=5.0, ts="2026-01-01T00:30:00Z",
+    )
+    store.insert_fill(
+        conn, run_id="run-2", decision_id=None, symbol="ETHUSDC", side="BUY",
+        candle_open_time=900_000, price=Decimal("2000"), qty=Decimal("1"),
+        gross_quote=Decimal("2000"), fee=Decimal("2"), net_quote=Decimal("2002"),
+        cash_after=Decimal("7998"), fee_bps=10.0, slippage_bps=5.0, ts="2026-01-01T00:15:00Z",
+    )
+    fills = store.get_fills(conn, "run-1")
+    assert [f["id"] for f in fills] == [first_id, second_id]
+    assert all(f["run_id"] == "run-1" for f in fills)
+    assert fills[1]["price"] == Decimal("81300.12345678")
+    assert fills[1]["qty"] == Decimal("0.00500001")
+    assert fills[1]["gross_quote"] == Decimal("406.50123456")
+    assert fills[1]["fee"] == Decimal("0.40650123")
+    assert fills[1]["net_quote"] == Decimal("406.09473333")
+    assert fills[1]["cash_after"] == Decimal("9592.41146293")
+
+
+def test_finish_run_setzt_finished_at(tmp_path):
+    conn = _conn(tmp_path)
+    store.create_run(conn, "run-1", "replay", "2026-01-01T00:00:00Z", "0.3.0")
+    before = conn.execute(
+        "SELECT finished_at FROM runs WHERE run_id = ?", ("run-1",)
+    ).fetchone()
+    assert before["finished_at"] is None
+    store.finish_run(conn, "run-1", "2026-01-01T01:00:00Z")
+    after = conn.execute(
+        "SELECT finished_at FROM runs WHERE run_id = ?", ("run-1",)
+    ).fetchone()
+    assert after["finished_at"] == "2026-01-01T01:00:00Z"
+
+
+def test_expire_decision_entfernt_aus_pending(tmp_path):
+    conn = _conn(tmp_path)
+    did = db.add_decision(conn, symbol="BTCUSDC", action="BUY", reason="test", approved=1,
+                           requested_position_pct=8)
+    store.mark_decision_pending(conn, did, pending_since_ms=1_000)
+    assert len(store.get_pending_decisions(conn)) == 1
+    store.expire_decision(conn, did)
+    assert store.get_pending_decisions(conn) == []
+    row = conn.execute(
+        "SELECT pending_since_ms, risk_code FROM decisions WHERE id = ?", (did,)
+    ).fetchone()
+    assert row["pending_since_ms"] is None
+    assert row["risk_code"] == "PENDING_EXPIRED"
