@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import inspect
+import os
 from decimal import Decimal
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -14,6 +17,44 @@ from aitra.risk import Proposal, RiskEngine
 
 BTC = money.BUILTIN_SPECS["BTCUSDC"]
 SPECS = {"BTCUSDC": BTC, "ETHUSDC": money.BUILTIN_SPECS["ETHUSDC"]}
+
+
+def _install_apply_guard():
+    """Laufzeit-Waechter fuer A-6b (Fix-Runde 1).
+
+    Der textbasierte Waechter (test_a6b_ledger_apply_hat_genau_einen_aufrufer)
+    erkennt nur den Substring '.apply(' und wird durch eine Zuweisung
+    (`bypass = Ledger.apply; bypass(...)`) oder `getattr(ledger, "apply")(...)`
+    umgangen, ohne dass dieser Substring je entsteht. Dieser Waechter patcht
+    Ledger.apply so, dass jeder tatsaechliche Aufruf ueber inspect.stack()
+    geprueft wird: die unmittelbar aufrufende Datei muss execute.py sein.
+
+    autospec=True ist noetig, damit der Patch weiterhin wie eine gebundene
+    Methode aufgerufen werden kann (self wird automatisch mitgereicht) -
+    das erzeugt aber zwei Arten von Rauschen im Frame-Stack, die uebersprungen
+    werden muessen: mehrere unittest/mock.py-interne Frames und einen von
+    autospec per exec() erzeugten Signatur-Proxy mit dem Dateinamen '<string>'.
+    """
+    original_apply = Ledger.apply
+
+    def guarded_apply(self, order, candle_next):
+        caller_file = None
+        for frame_info in inspect.stack()[1:]:
+            fn = frame_info.filename
+            if fn == "<string>" or os.path.basename(fn) == "mock.py":
+                continue
+            caller_file = fn
+            break
+        assert caller_file is not None, "Kein Aufrufer außerhalb von unittest.mock gefunden"
+        # Basisname, nicht endswith(): 'test_execute.py' endet zwar ebenfalls
+        # auf 'execute.py', ist aber nicht das Modul (derselbe Fallstrick, den
+        # der grep-Waechter mit line.endswith('execute.py') schon hat).
+        assert os.path.basename(caller_file) == "execute.py", (
+            f"Ledger.apply() wurde aus {caller_file} aufgerufen, nicht aus execute.py (A-6b)"
+        )
+        return original_apply(self, order, candle_next)
+
+    return patch.object(Ledger, "apply", autospec=True, side_effect=guarded_apply)
 
 
 def _ctx(tmp_path: Path, clock_ms: int = 900_000, kill_switch: bool = False) -> ExecutionContext:
@@ -111,6 +152,30 @@ def test_a6b_ledger_apply_hat_genau_einen_aufrufer():
     assert andere == []
 
 
+def test_a6b_laufzeit_waechter_laesst_echte_buchungen_durch(tmp_path):
+    """Laufzeit-Gegenstueck zum grep-Waechter (Fix-Runde 1): muss echte
+    Buchungswege unveraendert durchlassen - sowohl den Sofort-Fill in
+    execute_proposal() als auch den Fill in resolve_pending()."""
+    with _install_apply_guard():
+        ctx = _ctx(tmp_path)
+        r = execute_proposal(
+            Proposal("BTCUSDC", "BUY", 8), ctx, marks={}, ts_ms=900_000, ref_price=Decimal("81287.03"),
+            start_of_day_equity=Decimal("10000"), next_candle=_candle(1_800_000),
+        )
+        assert r.status == "filled"
+
+        # marks muss die gehaltene BTC-Position bewerten, sonst zaehlt equity()
+        # nur die Kasse und meldet einen Scheinverlust (DAILY_LOSS) nach dem
+        # ersten Kauf - kein Guard-Fehler, sondern ein Bewertungsartefakt.
+        pending = execute_proposal(
+            Proposal("BTCUSDC", "BUY", 5), ctx, marks={"BTCUSDC": Decimal("81287.03")}, ts_ms=1_800_000,
+            ref_price=Decimal("81287.03"), start_of_day_equity=Decimal("10000"), next_candle=None,
+        )
+        assert pending.status == "pending_fill"
+        fills = resolve_pending(ctx, _candle(2_700_000))
+        assert len(fills) == 1
+
+
 def test_execute_proposal_ohne_folgekerze_ist_pending(tmp_path):
     ctx = _ctx(tmp_path)
     result = execute_proposal(
@@ -172,6 +237,14 @@ def test_a7b_verfall_an_der_grenze_1799_vs_1801_sekunden(tmp_path):
                             (pending.decision_id,)).fetchone()
     assert row["risk_code"] == "PENDING_EXPIRED"
     assert row["pending_since_ms"] is None
+    assert ctx.conn.execute("SELECT COUNT(*) c FROM fills").fetchone()["c"] == 0
+
+    # Bisher nur implizit bewiesen (fills==0 direkt nach dem Verfall, ohne dass
+    # danach je eine Folgekerze angeboten wurde): auch eine anschliessend
+    # eintreffende, an sich passende Folgekerze darf den verfallenen Vorschlag
+    # nicht mehr fuellen, weil er in get_pending_decisions() nicht mehr auftaucht.
+    fills_nach_verfall = resolve_pending(ctx, _candle(1_800_000))
+    assert fills_nach_verfall == []
     assert ctx.conn.execute("SELECT COUNT(*) c FROM fills").fetchone()["c"] == 0
 
 
