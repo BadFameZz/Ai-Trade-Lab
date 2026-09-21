@@ -3,7 +3,7 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 VERSION="$(cat app/VERSION)"
-( cd app && python3 -m pytest -q tests )
+( cd app && python3 -m pytest -q -m "not slow" tests )
 mkdir -p dist
 tar --exclude='__pycache__' --exclude='.pytest_cache' --exclude='data' --exclude='.env' --exclude='tests' \
     --owner=0 --group=0 -czf dist/bundle.tar.gz -C app .

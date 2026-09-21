@@ -177,6 +177,50 @@ def test_a9_tempo_35040_kerzen_container_schwelle():
     assert elapsed < 40.0  # Container-Schwelle (876 Entscheidungen/s); Dev-Schwelle: 12,0 s
 
 
+@pytest.mark.slow
+def test_a9_tempo_35040_kerzen_realistische_handelsfrequenz():
+    """A-9-Ergaenzung (Fix-Runde 1, Coordinator-Befund): der obige Tempotest handelt
+    nur bei 0,1 % der Kerzen (t % 1000 == 0) und misst damit ueberwiegend das reine
+    Protokollieren von WAIT-Entscheidungen, nicht die volle Kette aus RiskEngine.check(),
+    sizing.size_order() und Ledger.apply(). Hier wird bei jeder siebten Kerze (~14,3 %,
+    im geforderten Fuenf-bis-Zehn-Kerzen-Rhythmus) ein echter Orderversuch ausgeloest,
+    abwechselnd BUY und SELL, damit auch der Verkaufspfad und die Positionsfuehrung unter
+    Last stehen. CFG (max_position_pct=10, max_total_exposure_pct=50) bleibt real -- mit
+    wachsender Position entstehen dabei auch echte MAX_EXPOSURE-Ablehnungen, keine
+    Kunstwelt ohne Risikoschranken.
+
+    BUY 4 % / SELL 2 % (statt z. B. SELL 50 %) ist bewusst so gewaehlt, dass die
+    RiskEngine-SELL-Pruefung (position_pct darf hoechstens die tatsaechlich gehaltene
+    Positionsgroesse in Prozent sein, B-1) nach einem erfolgreichen Kauf fast immer
+    durchgeht -- eine erste Messung mit SELL 50 % scheiterte fast vollstaendig an
+    NO_POSITION (gemessen: nur 10 von 5005 Versuchen kamen durch), weil 4-%-Kaeufe
+    niemals 50 % Bestand aufbauen. Das war kein tauglicher Lasttest, siehe Bericht."""
+    import time
+    candles = _candles(35_040)
+
+    def decide_fn(history):
+        t = len(history)
+        if t % 7 == 0:
+            if (t // 7) % 2 == 0:
+                return Proposal("BTCUSDC", "BUY", position_pct=4)
+            return Proposal("BTCUSDC", "SELL", position_pct=2)
+        return Proposal("BTCUSDC", "WAIT")
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    start = time.perf_counter()
+    result = run_replay(candles, decide_fn, CFG, SPECS, fee_bps=10.0, slippage_bps=5.0,
+                         benchmark_symbol="BTCUSDC", run_id="test-a9-realistisch", conn=conn)
+    elapsed = time.perf_counter() - start
+
+    buys = [f for f in result.fills if f.side == "BUY"]
+    sells = [f for f in result.fills if f.side == "SELL"]
+    assert result.decisions == 35_039
+    assert len(buys) > 500  # Pruefflaeche: der Kaufpfad muss echt unter Last stehen
+    assert len(sells) > 500  # Pruefflaeche: der Verkaufspfad muss echt unter Last stehen
+    assert elapsed < 40.0  # dieselbe Container-Schwelle wie A-9, jetzt unter realistischer Last
+
+
 def test_a10_speicher_35040_kerzen():
     candles = _candles(35_040)
 
@@ -208,6 +252,65 @@ def test_a6b_replay_laufzeit_waechter_laesst_run_replay_durch():
         result = run_replay(candles, decide_fn, CFG, SPECS, fee_bps=10.0, slippage_bps=5.0,
                              benchmark_symbol="BTCUSDC", run_id="test-a6b-replay")
     assert len(result.fills) > 0  # Pruefflaeche: der Waechter muss echte Buchungen sehen
+
+
+def test_final_equity_und_benchmark_von_hand_nachgerechnet():
+    """Coordinator-Befund (Fix-Runde 1): final_equity/benchmark_final_equity wurden von
+    keinem Test angefasst -- das ist die Zahl, um die es im ganzen Teilprojekt geht
+    (Strategie gegen Buy & Hold). Drei Kerzen, fee_bps=slippage_bps=0 (damit die Fill-
+    Preise exakt den ref_price-Vorgaben entsprechen und keine Rundungskette entsteht),
+    permissive Risikogrenzen (100/100/100), damit nichts abgelehnt wird.
+
+    Kerzen (BTCUSDC, alle OHLC gleich, flach): K0=100.00, K1=100.00, K2=121.00.
+
+    Strategie: BUY 50 % bei t=1 (history=[K0]), danach WAIT.
+    - Vor dem Kauf: cash=10000, keine Position -> equity=10000.
+    - target_quote = 10000 * 50/100 = 5000.
+    - ref_price (Entscheidungskerze K0.close) = 100.00, s=f=0 -> exec_price(sizing)=100.00.
+    - raw_qty = 5000 / 100.00 = 50; step_size=0.00001 -> qty=50 (schon glatt).
+    - Fuellung auf K1.open (E-006) = 100.00 (keine Luecke zu K0.close): gross=50*100=5000,
+      fee=0, cash_after = 10000 - 5000 = 5000, Position 50 BTC @ avg_price 100.00.
+    - t=2: WAIT, keine Aenderung.
+    - Endbewertung auf K2.close=121.00: final_equity = cash(5000) + 50*121 = 5000+6050
+      = 11050.
+
+    Benchmark (BuyAndHold, eigenes Ledger, dieselbe Startkasse 10000): margin_pct =
+    2*(fee_bps+slippage_bps)/100 = 0 -> position_pct=100 %.
+    - Erster Versuch bei on_candle(K1, K0): equity=10000 (keine Position), ref_price=
+      K0.close=100.00, target_quote=10000*100/100=10000, exec_price(sizing)=100.00,
+      raw_qty=10000/100=100 (schon glatt).
+    - Fuellung auf K1.open=100.00 (keine Luecke): gross=100*100=10000, fee=0,
+      cost=10000 <= cash(10000) (nicht groesser, geht durch) -> cash_after=0,
+      Position 100 BTC @ avg_price 100.00. bought=True, kein zweiter Versuch bei K2.
+    - Endbewertung auf K2.close=121.00: benchmark_final_equity = cash(0) + 100*121
+      = 12100.
+
+    Erwartungsgemaess schlaegt Buy & Hold (voll investiert) die 50-%-Strategie bei einem
+    reinen Aufwaertstrend -- genau die Vergleichsgroesse, um die es in der Spec geht."""
+    candles = [
+        Candle(symbol="BTCUSDC", interval="15m", open_time=0, close_time=899_999,
+               open=Decimal("100.00"), high=Decimal("100.00"), low=Decimal("100.00"),
+               close=Decimal("100.00"), volume=Decimal("1"), closed=True),
+        Candle(symbol="BTCUSDC", interval="15m", open_time=900_000, close_time=1_799_999,
+               open=Decimal("100.00"), high=Decimal("100.00"), low=Decimal("100.00"),
+               close=Decimal("100.00"), volume=Decimal("1"), closed=True),
+        Candle(symbol="BTCUSDC", interval="15m", open_time=1_800_000, close_time=2_699_999,
+               open=Decimal("121.00"), high=Decimal("121.00"), low=Decimal("121.00"),
+               close=Decimal("121.00"), volume=Decimal("1"), closed=True),
+    ]
+
+    def decide_fn(history):
+        if len(history) == 1:
+            return Proposal("BTCUSDC", "BUY", position_pct=50)
+        return Proposal("BTCUSDC", "WAIT")
+
+    permissive_cfg = Config(Decimal("10000"), 100, 100, 100, Path("/tmp"), "x" * 32)
+    result = run_replay(candles, decide_fn, permissive_cfg, SPECS, fee_bps=0.0, slippage_bps=0.0,
+                         benchmark_symbol="BTCUSDC", run_id="test-equity-handrechnung")
+
+    assert len(result.fills) == 1  # nur der eine BUY der Strategie
+    assert result.final_equity == Decimal("11050")
+    assert result.benchmark_final_equity == Decimal("12100")
 
 
 def test_a12_zeitraffer_nutzt_nur_simclock():
