@@ -14,6 +14,24 @@ from typing import Protocol, Sequence
 
 from . import store
 
+# Die sechs erlaubten Kerzenintervalle und ihre Laenge in Sekunden (Spec 11.2).
+# Feste Menge statt Parsen: '1M' waere ein Monat, '1m' eine Minute — ein Parser
+# ueber Ziffer+Buchstabe verwechselt beides still.
+INTERVALS: dict[str, int] = {
+    "1m": 60, "5m": 300, "15m": 900, "1h": 3600, "4h": 14400, "1d": 86400,
+}
+
+
+def interval_seconds(interval: str) -> int:
+    """Laenge einer Kerze in Sekunden. Grundlage der intervallrelativen
+    Veraltet-Schwellen aus Spec 8.2."""
+    try:
+        return INTERVALS[interval]
+    except KeyError as e:
+        raise ValueError(
+            f"Unbekanntes Intervall {interval!r}; erlaubt: {sorted(INTERVALS)}"
+        ) from e
+
 
 @dataclass(frozen=True)
 class Candle:

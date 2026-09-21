@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import re
 import sqlite3
 from decimal import Decimal
@@ -113,3 +114,29 @@ def test_a8b_keine_versteckte_uhr_kein_versteckter_zufall():
     next_top_level = re.search(r"\nclass |\ndef ", tail)
     wallclock_end = len(text) if next_top_level is None else wallclock_start + len("class WallClock") + next_top_level.start()
     assert wallclock_start < matches[0].start() < wallclock_end
+
+
+def test_intervalltabelle_und_abgeleitete_schwellen():
+    """Die sechs erlaubten Intervalle (Spec 11.2) und die Schwellen, die sich
+    daraus ergeben (Spec 8.2). Die Tabelle ist die einzige Stelle, an der ein
+    Intervall in Sekunden uebersetzt wird - ein Parser waere hier die Quelle
+    stiller Fehler ('1M' ist ein Monat, '1m' eine Minute)."""
+    from aitra.marketdata import INTERVALS, interval_seconds
+
+    assert INTERVALS == {"1m": 60, "5m": 300, "15m": 900, "1h": 3600,
+                          "4h": 14400, "1d": 86400}
+    assert interval_seconds("15m") == 900
+    with pytest.raises(ValueError):
+        interval_seconds("7m")
+    with pytest.raises(ValueError):
+        interval_seconds("1M")
+
+    # Spec 8.2, Tabelle: die Untergrenze greift nur bei 1m
+    erwartet = {"1m": (150, 300), "15m": (1350, 2700), "1h": (5400, 10800)}
+    geprueft = 0
+    for intervall, (warn, kill) in erwartet.items():
+        s = interval_seconds(intervall)
+        assert max(150, math.ceil(1.5 * s)) == warn, intervall
+        assert max(300, 3 * s) == kill, intervall
+        geprueft += 1
+    assert geprueft == 3
