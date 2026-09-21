@@ -191,6 +191,7 @@ Gemessen am 2026-09-21 (`wc -l app/aitra/*.py`):
 | `web.py` | **218** | 188 | Bestand, von der Fix-Welle nicht berührt. |
 | `execute.py` | **204** | 178 | Gewachsen um `reject_decision()` an sieben Stellen und `pending_ref_price`. |
 | `db.py` | **201** | 175 | Gewachsen um Migration 3 samt Begründung im SQL-Kommentar. |
+| `binance.py` | **280** | 235 *(A2, Aufgabe 3 + Fixrunde 1, gemessen am 2026-09-21)* | Der einzige Netzzugang des Pakets bündelt jede Härtung an einer Stelle, weil es keine zweite gibt: fünf Ausnahmeklassen, ein eigener Redirect-Handler (A-17b), ein Host-/Schema-Wächter, der im Konstruktor **und** vor jeder Einzelanfrage läuft (A-17), defensive `Decimal`-Wandlung mit float/bool-Ablehnung (E-002, mit eigenem Kommentar, warum beide Prüfungen bleiben), drei Endpunkte (`server_time`, `klines`, `exchange_info`) samt Gewichtszähler (A-17c), ein nach oben gedeckelter `Retry-After` und ein Fangzweig für Netzfehler jenseits von `URLError` (`OSError`, `http.client.HTTPException` — Fixrunde 1, Befund 1). Rund ein Drittel der Zeilen sind Docstrings, die das Warum jeder Prüfung tragen. |
 
 Zwei Beobachtungen, die zur Regel gehören: Ein erheblicher Teil des Wachstums sind **Docstrings
 und Kommentare**, die das *Warum* einer Korrektur tragen. Diese zu kürzen, um unter eine Zahl zu

@@ -20,6 +20,7 @@ Zahlen aus JSON entstehen ausschliesslich ueber Decimal(str) — nie ueber float
 """
 from __future__ import annotations
 
+import http.client
 import json
 import urllib.error
 import urllib.request
@@ -59,8 +60,11 @@ class BinanceHTTPError(BinanceError):
 
 
 class BinanceRateLimited(BinanceHTTPError):
-    """429 oder 418. retry_after_s ist 0, wenn Binance keinen Wert schickt —
-    die Mindestwartezeit setzt der Poller (Spec 8.3: mindestens 60 s)."""
+    """429 oder 418. retry_after_s ist 0, wenn Binance keinen Wert schickt oder
+    er negativ/unlesbar ist, und auf 3600 (eine Stunde) gedeckelt, wenn Binance
+    einen unplausibel hohen Wert schickt. Die Mindestwartezeit setzt trotzdem
+    der Poller (Spec 8.3: mindestens 60 s) — dieser Wert ist nur nach oben
+    begrenzt, nicht nach unten erhoeht."""
 
     def __init__(self, status: int, retry_after_s: int) -> None:
         super().__init__(status)
@@ -90,7 +94,22 @@ def _pruefe_ziel(url: str) -> None:
 
 
 def _dec(wert: Any, feld: str) -> Decimal:
-    """JSON-Wert zu Decimal. float und bool sind Fehler, keine Werte (E-002)."""
+    """JSON-Wert zu Decimal. float und bool sind Fehler, keine Werte (E-002).
+
+    Die beiden Teile der ersten Bedingung sind NICHT redundant zur zweiten
+    Pruefung, auch wenn beide float ablehnen:
+    - `bool` ist in Python eine Unterklasse von `int` (`isinstance(True, int)`
+      ist wahr). Ohne die eigene bool-Pruefung hier wuerde die zweite Zeile
+      (`isinstance(wert, (str, int))`) `True`/`False` klaglos durchlassen und
+      `Decimal(str(True))` wuerde scheitern - mit einer schlechteren
+      Fehlermeldung als hier. Fuer bool ist diese Zeile also die EINZIGE
+      wirksame Schicht.
+    - `float` ist weder `str` noch `int`, faellt also auch ohne diese Zeile
+      schon durch die zweite Pruefung. Hier ist sie nur ein praeziserer
+      Fehlertext ("float/bool statt Zeichenkette" statt "unerwarteter Typ").
+    Beide Zeilen bleiben deshalb stehen - beim naechsten Aufraeumen nicht als
+    Duplikat kuerzen (Sicherheits-Review, Fixrunde 1, Aufgabe 3).
+    """
     if isinstance(wert, bool) or isinstance(wert, float):
         raise BinanceMalformed(f"Feld {feld}: float/bool statt Zeichenkette")
     if not isinstance(wert, (str, int)):
@@ -108,9 +127,12 @@ def _int(wert: Any, feld: str) -> int:
 
 
 def _retry_after(e: urllib.error.HTTPError) -> int:
+    """Retry-After plausibilisiert: negativ/fehlend wird 0, ueber einer Stunde
+    wird auf 3600 gedeckelt. Ein Server mit Retry-After: 999999999 soll den
+    Poller nicht beliebig lange lahmlegen koennen."""
     roh = (e.headers or {}).get("Retry-After", "")
     try:
-        return max(0, int(str(roh).strip()))
+        return min(3600, max(0, int(str(roh).strip())))
     except (TypeError, ValueError):
         return 0
 
@@ -152,8 +174,21 @@ class BinanceClient:
             if e.code in (418, 429):
                 raise BinanceRateLimited(e.code, _retry_after(e)) from None
             raise BinanceHTTPError(e.code) from None
-        except urllib.error.URLError as e:
-            raise BinanceError(f"Verbindungsfehler: {type(e.reason).__name__}") from None
+        except (urllib.error.URLError, OSError, http.client.HTTPException) as e:
+            # URLError wrappt nur den Verbindungsaufbau. Alles danach - das
+            # Kopfzeilen-Parsen durch http.client und resp.read() selbst -
+            # laeuft daran vorbei: ein TCP-Reset (ConnectionResetError), ein
+            # Haenger nach den Kopfzeilen (TimeoutError) oder eine Antwort mit
+            # zu vielen Kopfzeilen (http.client.HTTPException) sind OSError-
+            # bzw. HTTPException-Faelle, keine URLError-Faelle. Ohne diesen
+            # erweiterten Fangzweig risse die rohe Ausnahme bis zum Poller
+            # durch und naehme den Thread mit der Veraltet-Erkennung mit
+            # (Fixrunde 1, Befund 1). HTTPError steht als Unterklasse von
+            # URLError bereits im Zweig darueber und wird dort abgefangen;
+            # URLError selbst ist wiederum eine OSError-Unterklasse, das
+            # Ueberschneiden im selben Tupel ist unschaedlich.
+            grund = type(e.reason).__name__ if isinstance(e, urllib.error.URLError) else type(e).__name__
+            raise BinanceError(f"Verbindungsfehler: {grund}") from None
         if len(roh) > self._max_bytes:
             raise BinanceTooLarge(f"Antwort über {self._max_bytes} Bytes – verworfen")
         try:
@@ -203,8 +238,9 @@ class BinanceClient:
             o, h, t, c = (_dec(zeile[1], "open"), _dec(zeile[2], "high"),
                            _dec(zeile[3], "low"), _dec(zeile[4], "close"))
             v = _dec(zeile[5], "volume")
-            if h < t or c <= 0 or o <= 0:
-                raise BinanceMalformed("klines: unplausible Kerze (high<low oder Preis<=0)")
+            if h < t or t <= 0 or c <= 0 or o <= 0:
+                raise BinanceMalformed(
+                    "klines: unplausible Kerze (high<low, high/low<=0 oder Preis<=0)")
             if close_time >= server_time_ms:
                 continue  # laufende Kerze — nie weitergeben
             kerzen.append(Candle(symbol=symbol, interval=interval, open_time=open_time,

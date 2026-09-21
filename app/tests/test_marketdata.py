@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import math
 import re
 import sqlite3
 from decimal import Decimal
@@ -131,12 +130,28 @@ def test_intervalltabelle_und_abgeleitete_schwellen():
     with pytest.raises(ValueError):
         interval_seconds("1M")
 
-    # Spec 8.2, Tabelle: die Untergrenze greift nur bei 1m
-    erwartet = {"1m": (150, 300), "15m": (1350, 2700), "1h": (5400, 10800)}
+    # Spec 8.2, Tabelle: warn_s/kill_s in Sekunden, woertlich aus der Spec (nicht aus der
+    # Formel von staleness() zurueckgerechnet - sonst bewacht der Test nichts: aendert
+    # sich der Faktor 1,5 in staleness(), bliebe eine Neuberechnung hier stillschweigend
+    # gruen). Stattdessen wird staleness() an den vier Grenzpunkten je Intervall wirklich
+    # aufgerufen; die Untergrenze aus Spec 8.2 greift dabei nur bei "1m".
+    schwellen = {"1m": (150, 300), "15m": (1350, 2700), "1h": (5400, 10800)}
+    clock = SimClock(10_000_000_000)
     geprueft = 0
-    for intervall, (warn, kill) in erwartet.items():
+    for intervall, (warn, kill) in schwellen.items():
         s = interval_seconds(intervall)
-        assert max(150, math.ceil(1.5 * s)) == warn, intervall
-        assert max(300, 3 * s) == kill, intervall
+
+        def _status(alter_s: int) -> str:
+            return staleness(
+                clock,
+                latest_close_time_ms=clock.now_ms() - alter_s * 1000,
+                server_time_ms=clock.now_ms(),
+                interval_s=s,
+            ).status
+
+        assert _status(warn) == "ok", intervall
+        assert _status(warn + 1) == "warn", intervall
+        assert _status(kill) == "warn", intervall
+        assert _status(kill + 1) == "stale", intervall
         geprueft += 1
     assert geprueft == 3

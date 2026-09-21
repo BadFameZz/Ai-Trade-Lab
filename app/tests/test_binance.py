@@ -5,6 +5,7 @@ import json
 import socket
 import subprocess
 import threading
+import time
 import urllib.error
 import urllib.request
 from decimal import Decimal
@@ -244,6 +245,8 @@ def test_offene_kerze_wird_verworfen_und_nie_weitergegeben():
              "0", 1, "0", "0", "0"]]), "nicht numerisch"),
     (_body([[0, "81287.00", "81300.00", "81200.00", "81250.00", "1", "899999",
              "0", 1, "0", "0", "0"]]), "closeTime als Zeichenkette"),
+    (_body([[0, "81287.00", "0", "0", "81250.00", "1", 899_999,
+             "0", 1, "0", "0", "0"]]), "high und low sind 0"),
 ])
 def test_kaputte_antworten_werfen_malformed(roh, grund):
     c, _ = _client({"/api/v3/klines": FakeAntwort(roh)})
@@ -291,6 +294,18 @@ def test_retry_after_fehlt_oder_ist_unsinn(kopf):
     with pytest.raises(BinanceRateLimited) as e:
         c.klines("BTCUSDC", "15m", server_time_ms=900_000)
     assert e.value.retry_after_s == 0
+
+
+@pytest.mark.parametrize("wert,erwartet", [(3599, 3599), (3600, 3600), (3601, 3600)])
+def test_retry_after_wird_nach_oben_gedeckelt(wert, erwartet):
+    """Ein Server mit Retry-After: 999999999 darf den Wert nicht ungeprueft
+    durchreichen - min(3600, ...) begrenzt auf hoechstens eine Stunde."""
+    fehler = urllib.error.HTTPError(
+        f"{BASIS}/api/v3/klines", 429, "x", {"Retry-After": str(wert)}, None)
+    c, _ = _client({"/api/v3/klines": fehler})
+    with pytest.raises(BinanceRateLimited) as e:
+        c.klines("BTCUSDC", "15m", server_time_ms=900_000)
+    assert e.value.retry_after_s == erwartet
 
 
 def test_andere_http_fehler_bleiben_unterscheidbar():
@@ -398,6 +413,81 @@ def test_exchange_info_lehnt_unbrauchbare_antworten_ab(kwargs):
     c, _ = _client({"/api/v3/exchangeInfo": FakeAntwort(_exchange_info_body(**kwargs))})
     with pytest.raises(BinanceMalformed):
         c.exchange_info("BNBUSDC")
+
+
+# ----------------------------------- echte Netzfehler jenseits von URLError
+
+class _KopfzeilenUeberlauf(BaseHTTPRequestHandler):
+    """Schickt ueber 100 Kopfzeilen - http.client._MAXHEADERS ist 100, danach
+    wirft der Parser http.client.HTTPException direkt, nicht als URLError."""
+
+    def do_GET(self):
+        self.send_response(200)
+        for i in range(105):
+            self.send_header(f"X-Pad-{i}", "1")
+        self.send_header("Content-Length", "2")
+        self.end_headers()
+        self.wfile.write(b"{}")
+
+    def log_message(self, *a):
+        pass
+
+
+class _Haenger(BaseHTTPRequestHandler):
+    """Schickt gueltige Kopfzeilen, dann nie den versprochenen Koerper - der
+    Socket-Read blockiert, bis der Client-Timeout greift (TimeoutError, eine
+    OSError-Unterklasse, keine URLError)."""
+
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header("Content-Length", "100")
+        self.end_headers()
+        time.sleep(0.6)  # laenger als der Client-Timeout im Test unten
+
+    def log_message(self, *a):
+        pass
+
+
+def _lokaler_server(handler_cls):
+    srv = HTTPServer(("127.0.0.1", 0), handler_cls)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    return srv
+
+
+def test_kopfzeilen_ueberlauf_wird_zu_binanceerror(monkeypatch):
+    """Fixrunde 1, Befund 1 (blockierend): _hole() fing bisher nur HTTPError
+    und URLError. http.client.HTTPException ist keine URLError-Unterklasse und
+    riss unveraendert bis zum Aufrufer durch - im Poller (Aufgabe 5) waere das
+    ein abgestorbener Thread, der die Veraltet-Erkennung mitnimmt.
+
+    _pruefe_ziel wird fuer diesen Test durch einen No-Op ersetzt: geprueft
+    wird hier ausschliesslich die Fehlerabbildung im Netzwerkpfad, nicht die
+    Allowlist (die hat eigene Tests weiter oben). Der lokale Server spricht
+    Klartext-HTTP auf Loopback - kein Zugriff nach draussen."""
+    srv = _lokaler_server(_KopfzeilenUeberlauf)
+    monkeypatch.setattr(binance, "_pruefe_ziel", lambda url: None)
+    try:
+        c = BinanceClient(f"http://127.0.0.1:{srv.server_port}")
+        with pytest.raises(BinanceError):
+            c.server_time()
+    finally:
+        srv.shutdown()
+        srv.server_close()
+
+
+def test_haengende_verbindung_wird_zu_binanceerror(monkeypatch):
+    """Wie oben, aber fuer den Fall aus Befund 1: die Verbindung haengt nach
+    den Kopfzeilen. Der Socket-Timeout (TimeoutError/OSError) darf den
+    Aufrufer ebenfalls nicht roh erreichen."""
+    srv = _lokaler_server(_Haenger)
+    monkeypatch.setattr(binance, "_pruefe_ziel", lambda url: None)
+    try:
+        c = BinanceClient(f"http://127.0.0.1:{srv.server_port}", timeout_s=0.2)
+        with pytest.raises(BinanceError):
+            c.server_time()
+    finally:
+        srv.shutdown()
+        srv.server_close()
 
 
 # ------------------------------------------- zweite Schicht: wer darf ins Netz
