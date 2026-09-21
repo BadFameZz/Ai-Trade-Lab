@@ -252,6 +252,46 @@ def test_a9_tempo_35040_kerzen_realistische_handelsfrequenz():
     assert elapsed < 40.0  # dieselbe Container-Schwelle wie A-9, jetzt unter realistischer Last
 
 
+@pytest.mark.slow
+def test_a9_tempo_35040_kerzen_dateibasierte_db(tmp_path):
+    """A-9 gegen eine DATEI, nicht gegen :memory: (Koordinatoren-Entscheidung).
+
+    Die beiden anderen A-9-Messungen laufen gegen :memory:, wo ein Commit
+    praktisch nichts kostet. Ein Trainingslauf in Teilprojekt C benutzt aber
+    eine dateibasierte Datenbank, und die Zahl aus A-9 soll dessen
+    Rechenbudget tragen -- eine Messung gegen :memory: beantwortet diese Frage
+    nicht.
+
+    Gemessen wurde vor dem Sammelschreiben 12,86 s bei 116.421 Commits
+    (2.715 Entsch./s), danach 6,49 s bei 38.848 Commits (5.398 Entsch./s).
+    Die Schwelle bleibt unveraendert bei 40,0 s bzw. 876 Entscheidungen/s.
+    """
+    import time
+    candles = _candles(35_040)
+
+    def decide_fn(history):
+        t = len(history)
+        if t % 7 == 0:
+            if (t // 7) % 2 == 0:
+                return Proposal("BTCUSDC", "BUY", position_pct=4)
+            return Proposal("BTCUSDC", "SELL", position_pct=2)
+        return Proposal("BTCUSDC", "WAIT")
+
+    conn = db.connect(tmp_path / "tempo.db")
+    db.migrate(conn)
+    start = time.perf_counter()
+    result = run_replay(candles, decide_fn, CFG, SPECS, fee_bps=10.0, slippage_bps=5.0,
+                         benchmark_symbol="BTCUSDC", run_id="test-a9-datei", conn=conn)
+    elapsed = time.perf_counter() - start
+
+    assert result.decisions == 35_039
+    assert len(result.fills) > 500  # Pruefflaeche: es wird wirklich geschrieben
+    # Die Kurve ist vollstaendig auf der Platte gelandet, nicht nur im Puffer.
+    assert len(store.get_equity_curve(conn, "test-a9-datei", limit=100_000)) == 35_039
+    assert elapsed < 40.0, f"{elapsed:.2f} s fuer 35.039 Entscheidungen = {35_039/elapsed:.0f}/s"
+    assert (tmp_path / "tempo.db").stat().st_size > 0
+
+
 def test_a10_speicher_35040_kerzen():
     candles = _candles(35_040)
 

@@ -166,6 +166,18 @@ def set_state(conn, key: str, value: str) -> None:
 
 
 def add_decision(conn, **d) -> int:
+    """Schreibt eine Entscheidung ins Journal; mit run_id in EINER Transaktion.
+
+    Der Aufrufer trug run_id frueher mit einem zweiten UPDATE plus eigenem
+    Commit nach. Das waren zwei Commits je Entscheidung und im Zeitraffer der
+    groesste Einzelposten der Schreiblast (gemessen: 70.078 von 116.421 Commits
+    bei 35.039 Kerzen, dateibasierte DB). Jetzt laeuft das UPDATE in derselben
+    Transaktion wie das INSERT, und es gibt genau einen Commit.
+
+    Die Spalte run_id kommt erst mit Migration 2. Das UPDATE wird deshalb nur
+    ausgefuehrt, wenn ein run_id uebergeben wurde — auf einem Schema der
+    Version 1 (A-15) bleibt add_decision damit lauffaehig wie zuvor.
+    """
     cur = conn.execute(
         """INSERT INTO decisions (ts, strategy_version, symbol, action, confidence, reason,
                                   requested_position_pct, approved, risk_code, risk_reason)
@@ -176,6 +188,9 @@ def add_decision(conn, **d) -> int:
             d.get("risk_code"), d.get("risk_reason"),
         ),
     )
+    run_id = d.get("run_id")
+    if run_id is not None:
+        conn.execute("UPDATE decisions SET run_id = ? WHERE id = ?", (run_id, cur.lastrowid))
     conn.commit()
     return cur.lastrowid
 

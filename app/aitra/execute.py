@@ -49,17 +49,28 @@ class ExecutionResult:
 
 
 def _journal_fill(ctx: ExecutionContext, decision_id: int, fill: Fill) -> None:
+    """Fill, Entscheidungsverknuepfung und Positionsschnappschuss in EINER Transaktion.
+
+    Die drei Schreibvorgaenge gehoeren zusammen: ein Fill ohne die zugehoerige
+    fill_id in decisions oder ohne den Positionsschnappschuss waere ein halb
+    gebuchter Zustand. Frueher committete jeder einzeln (drei Commits je Fill,
+    gemessen 11.292 von 116.421 eines Jahreslaufs) — das war nicht nur teuer,
+    sondern liess auch ein Fenster offen, in dem genau dieser halbe Zustand
+    auf der Platte stand.
+    """
     fill_id = store.insert_fill(
         ctx.conn, run_id=ctx.run_id, decision_id=decision_id, symbol=fill.symbol, side=fill.side,
         candle_open_time=fill.candle_open_time, price=fill.price, qty=fill.qty,
         gross_quote=fill.gross_quote, fee=fill.fee, net_quote=fill.net_quote,
         cash_after=fill.cash_after, fee_bps=fill.fee_bps, slippage_bps=fill.slippage_bps,
-        ts=db.now(),
+        ts=db.now(), commit=False,
     )
-    store.resolve_decision(ctx.conn, decision_id, fill_id)
+    store.resolve_decision(ctx.conn, decision_id, fill_id, commit=False)
     pos = ctx.ledger.position(fill.symbol)
     store.upsert_position(ctx.conn, run_id=ctx.run_id, symbol=fill.symbol, qty=pos.qty,
-                           avg_price=pos.avg_price, realized_pnl=pos.realized_pnl, updated_at=db.now())
+                           avg_price=pos.avg_price, realized_pnl=pos.realized_pnl,
+                           updated_at=db.now(), commit=False)
+    ctx.conn.commit()
 
 
 def execute_proposal(
@@ -90,10 +101,8 @@ def execute_proposal(
         ctx.conn, strategy_version=strategy_version, symbol=proposal.symbol,
         action=proposal.action, confidence=proposal.confidence, reason=reason,
         requested_position_pct=proposal.position_pct, approved=int(decision.approved),
-        risk_code=decision.code, risk_reason=decision.reason,
+        risk_code=decision.code, risk_reason=decision.reason, run_id=ctx.run_id,
     )
-    ctx.conn.execute("UPDATE decisions SET run_id = ? WHERE id = ?", (ctx.run_id, decision_id))
-    ctx.conn.commit()
 
     if proposal.action.upper() == "WAIT":
         return ExecutionResult(decision_id, decision.approved, decision.code, decision.reason, status="no_order")

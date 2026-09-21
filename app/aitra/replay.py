@@ -45,6 +45,11 @@ class ReplayResult:
     hier und im CLI-Bericht, statt nur im Inneren von BuyAndHold."""
 
 
+# Groesse eines Schreibblocks der Equity-Kurve. 1.000 Punkte sind rund 100 kB
+# Puffer und druecken die Zahl der Commits eines Jahreslaufs von 35.039 auf 36.
+_EQUITY_BLOCK = 1000
+
+
 def _utc_date(ms: int):
     """Der UTC-Kalendertag einer Kerze; Grundlage fuer den Tagesreset (E-008)."""
     return datetime.fromtimestamp(ms / 1000, tz=timezone.utc).date()
@@ -90,6 +95,7 @@ def run_replay(
     kill_switch_engagements = 0
     sod_equity = ledger.mark({symbol: candles[0].close}, ts_ms=candles[0].close_time).equity
     fills: list[Fill] = []
+    punkte: list[store.EquityPoint] = []
     decisions = 0
 
     for t in range(1, len(candles)):
@@ -120,14 +126,22 @@ def run_replay(
         bench.on_candle(candles[t], current)
 
         # Spec 4.4 und 9.2: je Kerze ein Punkt der Equity-Kurve, unter der
-        # run_id des Laufs, mit der Benchmark daneben. Ohne diesen Aufruf hatte
-        # store.append_equity_point() im gesamten Produktivcode keinen Aufrufer.
+        # run_id des Laufs, mit der Benchmark daneben. Gesammelt geschrieben —
+        # ein Commit je Punkt kostet auf einer dateibasierten Datenbank ein
+        # Vielfaches des Schreibens selbst, und genau eine solche benutzt ein
+        # Trainingslauf in Teilprojekt C.
         v = ledger.mark(marks, ts_ms=current.close_time)
-        store.append_equity_point(
-            conn, run_id=run_id, ts_ms=current.close_time, equity=v.equity, cash=v.cash,
+        punkte.append(store.EquityPoint(
+            run_id=run_id, ts_ms=current.close_time, equity=v.equity, cash=v.cash,
             benchmark_equity=bench.equity(marks, ts_ms=current.close_time),
             exposure_pct=v.exposure_pct,
-        )
+        ))
+        if len(punkte) >= _EQUITY_BLOCK:
+            store.append_equity_points(conn, punkte)
+            punkte.clear()
+
+    store.append_equity_points(conn, punkte)  # Restblock
+    punkte.clear()
 
     final_marks = {symbol: candles[-1].close}
     final_equity = ledger.mark(final_marks, ts_ms=candles[-1].close_time).equity

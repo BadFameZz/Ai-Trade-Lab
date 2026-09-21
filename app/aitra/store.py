@@ -148,7 +148,7 @@ def get_symbol_spec(conn: sqlite3.Connection, symbol: str) -> money.SymbolSpec |
 def insert_fill(conn: sqlite3.Connection, *, run_id: str, decision_id: int | None, symbol: str,
                  side: str, candle_open_time: int, price: Decimal, qty: Decimal,
                  gross_quote: Decimal, fee: Decimal, net_quote: Decimal, cash_after: Decimal,
-                 fee_bps: float, slippage_bps: float, ts: str) -> int:
+                 fee_bps: float, slippage_bps: float, ts: str, commit: bool = True) -> int:
     cur = conn.execute(
         """INSERT INTO fills (ts, run_id, decision_id, symbol, side, candle_open_time, price, qty,
                                gross_quote, fee, net_quote, cash_after, fee_bps, slippage_bps)
@@ -158,7 +158,8 @@ def insert_fill(conn: sqlite3.Connection, *, run_id: str, decision_id: int | Non
          money.to_text(fee, DP), money.to_text(net_quote, DP), money.to_text(cash_after, DP),
          fee_bps, slippage_bps),
     )
-    conn.commit()
+    if commit:
+        conn.commit()
     return cur.lastrowid
 
 
@@ -174,7 +175,8 @@ def get_fills(conn: sqlite3.Connection, run_id: str) -> list[dict]:
 
 
 def upsert_position(conn: sqlite3.Connection, *, run_id: str, symbol: str, qty: Decimal,
-                     avg_price: Decimal, realized_pnl: Decimal, updated_at: str) -> None:
+                     avg_price: Decimal, realized_pnl: Decimal, updated_at: str,
+                     commit: bool = True) -> None:
     conn.execute(
         """INSERT INTO positions (run_id, symbol, qty, avg_price, realized_pnl, updated_at)
            VALUES (?, ?, ?, ?, ?, ?)
@@ -184,7 +186,8 @@ def upsert_position(conn: sqlite3.Connection, *, run_id: str, symbol: str, qty: 
         (run_id, symbol, money.to_text(qty, DP), money.to_text(avg_price, DP),
          money.to_text(realized_pnl, DP), updated_at),
     )
-    conn.commit()
+    if commit:
+        conn.commit()
 
 
 def get_positions(conn: sqlite3.Connection, run_id: str) -> dict[str, dict]:
@@ -198,18 +201,48 @@ def get_positions(conn: sqlite3.Connection, run_id: str) -> dict[str, dict]:
     return out
 
 
+@dataclass(frozen=True)
+class EquityPoint:
+    """Ein Punkt der Equity-Kurve (Spec 4.4/9.2)."""
+    run_id: str
+    ts_ms: int
+    equity: Decimal
+    cash: Decimal
+    benchmark_equity: Decimal | None
+    exposure_pct: float
+
+
+_EQUITY_SQL = """INSERT INTO equity_curve (run_id, ts_ms, equity, cash, benchmark_equity, exposure_pct)
+       VALUES (?, ?, ?, ?, ?, ?)
+       ON CONFLICT(run_id, ts_ms) DO UPDATE SET
+           equity=excluded.equity, cash=excluded.cash,
+           benchmark_equity=excluded.benchmark_equity, exposure_pct=excluded.exposure_pct"""
+
+
+def _equity_row(p: EquityPoint) -> tuple:
+    return (p.run_id, p.ts_ms, money.to_text(p.equity, DP), money.to_text(p.cash, DP),
+            None if p.benchmark_equity is None else money.to_text(p.benchmark_equity, DP),
+            p.exposure_pct)
+
+
+def append_equity_points(conn: sqlite3.Connection, punkte: Sequence[EquityPoint]) -> None:
+    """Schreibt mehrere Punkte der Equity-Kurve in EINER Transaktion.
+
+    Ein Commit je Punkt kostet auf einer dateibasierten Datenbank ein
+    Vielfaches des Schreibens selbst (gemessen: 35.039 von 116.421 Commits
+    eines Jahreslaufs). Genau diese Datenbank benutzt ein Trainingslauf in
+    Teilprojekt C, nicht :memory:.
+    """
+    if not punkte:
+        return
+    conn.executemany(_EQUITY_SQL, [_equity_row(p) for p in punkte])
+    conn.commit()
+
+
 def append_equity_point(conn: sqlite3.Connection, *, run_id: str, ts_ms: int, equity: Decimal,
                          cash: Decimal, benchmark_equity: Decimal | None, exposure_pct: float) -> None:
-    conn.execute(
-        """INSERT INTO equity_curve (run_id, ts_ms, equity, cash, benchmark_equity, exposure_pct)
-           VALUES (?, ?, ?, ?, ?, ?)
-           ON CONFLICT(run_id, ts_ms) DO UPDATE SET
-               equity=excluded.equity, cash=excluded.cash,
-               benchmark_equity=excluded.benchmark_equity, exposure_pct=excluded.exposure_pct""",
-        (run_id, ts_ms, money.to_text(equity, DP), money.to_text(cash, DP),
-         None if benchmark_equity is None else money.to_text(benchmark_equity, DP), exposure_pct),
-    )
-    conn.commit()
+    """Einzelner Punkt — Bequemlichkeitshuelle um append_equity_points()."""
+    append_equity_points(conn, [EquityPoint(run_id, ts_ms, equity, cash, benchmark_equity, exposure_pct)])
 
 
 def get_equity_curve(conn: sqlite3.Connection, run_id: str, limit: int = 500) -> list[dict]:
@@ -244,13 +277,15 @@ def mark_decision_pending(conn: sqlite3.Connection, decision_id: int, pending_si
     conn.commit()
 
 
-def resolve_decision(conn: sqlite3.Connection, decision_id: int, fill_id: int) -> None:
+def resolve_decision(conn: sqlite3.Connection, decision_id: int, fill_id: int,
+                      commit: bool = True) -> None:
     conn.execute(
         "UPDATE decisions SET fill_id = ?, pending_since_ms = NULL, pending_ref_price = NULL "
         "WHERE id = ?",
         (fill_id, decision_id),
     )
-    conn.commit()
+    if commit:
+        conn.commit()
 
 
 def reject_decision(conn: sqlite3.Connection, decision_id: int, code: str, reason: str) -> None:
