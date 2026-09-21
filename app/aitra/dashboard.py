@@ -94,9 +94,15 @@ def build_status(conn: sqlite3.Connection, cfg: Config) -> dict:
     engine = RiskEngine(cfg)  # zustandslos (nur self.cfg) - eine frische Instanz rechnet identisch
     return dict(
         version=VERSION, mode=cfg.trading_mode, live_locked=cfg.live_locked,
-        # E-007: Geld geht als Zeichenkette raus, nie als JSON-Zahl.
+        # E-007: Geld geht als Zeichenkette raus, nie als JSON-Zahl. Fixrunde 1,
+        # Punkt 2 (Koordinator/Reviewer): starting_balance stand hier zuvor roh
+        # (cfg.starting_balance), obwohl equity direkt darueber schon money.to_text()
+        # nutzte - derselbe Verstoss wie bei equity/pnl/daily_pnl, nur unbemerkt
+        # geblieben, weil kein Test das Feld pruefte. Siehe
+        # test_alle_geldfelder_in_status_sind_kanonischer_text (Wurzelbehebung:
+        # prueft die FORM aller Geldfelder, nicht nur einzelne Werte).
         equity=money.to_text(v.equity), cash=money.to_text(ledger.cash),
-        starting_balance=cfg.starting_balance,
+        starting_balance=money.to_text(cfg.starting_balance),
         pnl=money.to_text(round(v.equity - cfg.starting_balance, 8)),
         daily_pnl=money.to_text(round(v.equity - pf.start_of_day_equity, 8)),
         daily_loss_pct=round(engine.daily_loss_pct(pf), 4),

@@ -86,3 +86,27 @@ def test_store_und_store_run_sind_wirklich_getrennt():
     verirrt = [n for n in marktdaten if hasattr(store_run, n)]
     assert uebriggeblieben == [], f"noch in store.py statt store_run.py: {uebriggeblieben}"
     assert verirrt == [], f"in store_run.py statt store.py: {verirrt}"
+
+
+def test_web_und_dashboard_sind_wirklich_getrennt():
+    """Die Naht aus A2/Aufgabe 6 (Ruling des Koordinators, Fixrunde 1 ausdruecklich
+    beauftragt): web.py beantwortet HTTP, dashboard.py rechnet die Zahlen aus
+    (build_live_ledger, last_prices, build_status, build_health).
+
+    Nicht nur 'dashboard.py hat die Funktionen', sondern auch: sie duerfen nicht
+    ZUSAETZLICH in web.py auftauchen. Ein hasattr()-Check allein wuerde eine
+    Doppelung als verschachtelte Closure innerhalb von create_app() nicht sehen -
+    Closures sind keine Modulattribute -, deshalb zusaetzlich ein Text-Scan von
+    web.py auf 'def <name>('. Rot-Nachweis (Fixrunde 1): eine tote Kopie von
+    build_live_ledger() zusaetzlich in web.py definiert liess die volle Suite
+    unveraendert gruen - dieser Test faengt genau das jetzt ab.
+    """
+    from aitra import dashboard, web
+
+    namen = ["build_live_ledger", "last_prices", "build_status", "build_health"]
+    fehlend = [n for n in namen if not hasattr(dashboard, n)]
+    assert fehlend == [], f"fehlt in dashboard.py: {fehlend}"
+
+    web_text = Path(web.__file__).read_text()
+    verirrt = [n for n in namen if f"def {n}(" in web_text]
+    assert verirrt == [], f"zusaetzlich in web.py definiert statt nur in dashboard.py: {verirrt}"

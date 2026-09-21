@@ -1,10 +1,10 @@
+import re
 from decimal import Decimal
 
 import pytest
 
 from aitra import db, money, store, store_run
 from aitra.config import Config
-from aitra.marketdata import Candle
 from aitra.web import create_app
 
 TOKEN = "t" * 32
@@ -189,3 +189,80 @@ def test_equity_curve_endpoint(client, app):
     assert len(body["points"]) == 1, f"Pruefflaeche: {len(body['points'])} Punkte statt 1"
     assert isinstance(body["points"][0]["equity"], str)
     assert body["points"][0]["benchmark"] == "10050.00000000"
+
+
+_GELD_TEXT = re.compile(r"-?\d+\.\d{8}$")
+
+
+def test_alle_geldfelder_in_status_sind_kanonischer_text(client, app):
+    """Wurzelbehebung, Fixrunde 1 Punkt 2 (Koordinator/Reviewer): Einzelpruefungen
+    hatten bereits equity/pnl/daily_pnl (Kernarbeit dieser Aufgabe) und dann noch
+    starting_balance (vom Reviewer gefunden, im selben Antwortkoerper) uebersehen
+    - beide Male, weil kein Test die FORM aller Geldfelder auf einmal prueft.
+    Statt eines fuenften Einzelfeldtests: jedes Geldfeld von /api/status generisch
+    gegen die kanonische Form (money.to_text, 8 Nachkommastellen, als Zeichenkette)
+    geprueft."""
+    _mit_marktdaten(app)
+    conn = db.connect(app.config["AITRA"].data_dir / "aitra.db")
+    store_run.ensure_run(conn, "live", "live", db.now(), "0.3.0")
+    store_run.insert_fill(conn, run_id="live", decision_id=None, symbol="BTCUSDC", side="BUY",
+                           candle_open_time=900_000, price=Decimal("81287.03"), qty=Decimal("0.01"),
+                           gross_quote=Decimal("812.8703"), fee=Decimal("0.81"),
+                           net_quote=Decimal("813.6803"), cash_after=Decimal("9186.3197"),
+                           fee_bps=10.0, slippage_bps=5.0, ts=db.now())
+    store_run.upsert_position(conn, run_id="live", symbol="BTCUSDC", qty=Decimal("0.01"),
+                               avg_price=Decimal("81287.03"), realized_pnl=Decimal("0"),
+                               updated_at=db.now())
+    store_run.append_equity_points(conn, [store_run.EquityPoint(
+        run_id="live", ts_ms=900_000, equity=Decimal("9999.19"), cash=Decimal("9186.3197"),
+        benchmark_equity=Decimal("10050"), exposure_pct=8.1,
+    )])
+    conn.close()
+
+    s = client.get("/api/status").get_json()
+    for feld in ("equity", "cash", "starting_balance", "pnl", "daily_pnl"):
+        assert isinstance(s[feld], str), f"{feld} ist keine Zeichenkette (E-007): {s[feld]!r}"
+        assert _GELD_TEXT.match(s[feld]), f"{feld} nicht kanonisch (money.to_text): {s[feld]!r}"
+
+    assert len(s["positions"]) == 1, "Pruefflaeche: Positionsliste darf hier nicht leer sein"
+    for feld in ("qty", "avg_price", "realized_pnl"):
+        wert = s["positions"][0][feld]
+        assert isinstance(wert, str) and _GELD_TEXT.match(wert), f"positions[0].{feld}: {wert!r}"
+
+    assert s["benchmark"]["equity"] is not None, "Pruefflaeche: benchmark.equity darf hier nicht None sein"
+    assert _GELD_TEXT.match(s["benchmark"]["equity"]), f"benchmark.equity: {s['benchmark']['equity']!r}"
+
+
+def test_create_app_schliesst_alle_eigenen_verbindungen(tmp_path, monkeypatch):
+    """Rot-Nachweis/Wurzelbehebung, Fixrunde 1 Punkt 3 (Koordinator/Reviewer):
+    create_app() oeffnete drei eigene Verbindungen (Init-Block, specs-Aufbau -
+    dort sogar einmal je Symbol -, Poller). Vor der Behebung wurde nur die des
+    Pollers je geschlossen (dort bewusst, der Poller besitzt sie fuer seine
+    Lebensdauer). Zaehlt echte sqlite3.Connection-Objekte, die aitra.db.connect()
+    zurueckgibt, und prueft danach, wie viele noch offen sind. MARKET_DATA_ENABLED
+    bleibt hier False (Vorgabewert), der Poller startet also gar nicht - jede
+    verbleibende offene Verbindung ist ein Leck."""
+    import aitra.db as db_mod
+
+    echtes_connect = db_mod.connect
+    geoeffnet: list = []
+
+    def zaehlend(path):
+        c = echtes_connect(path)
+        geoeffnet.append(c)
+        return c
+
+    monkeypatch.setattr(db_mod, "connect", zaehlend)
+    create_app(Config(100, 10, 2, 50, tmp_path, TOKEN))
+
+    noch_offen = 0
+    for c in geoeffnet:
+        try:
+            c.execute("SELECT 1")
+            noch_offen += 1
+        except Exception:
+            pass  # sqlite3.ProgrammingError: Cannot operate on a closed database - korrekt geschlossen
+    assert noch_offen == 0, (
+        f"Pruefflaeche: {noch_offen} von {len(geoeffnet)} waehrend create_app() "
+        f"geoeffneten Verbindungen sind noch offen"
+    )

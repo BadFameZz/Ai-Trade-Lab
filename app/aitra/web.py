@@ -27,18 +27,37 @@ def create_app(cfg: Config | None = None) -> Flask:
     db_path = cfg.data_dir / "aitra.db"
     engine = RiskEngine(cfg)
 
-    with db.connect(db_path) as conn:
-        db.migrate(conn)
-        if db.get_state(conn, "initialized") is None:
-            db.set_state(conn, "initialized", db.now())
-            db.set_state(conn, "kill_switch", "0")
-            db.add_decision(conn, symbol="SYSTEM", action="WAIT", confidence=100,
+    init_conn = db.connect(db_path)
+    try:
+        db.migrate(init_conn)
+        if db.get_state(init_conn, "initialized") is None:
+            db.set_state(init_conn, "initialized", db.now())
+            db.set_state(init_conn, "kill_switch", "0")
+            db.add_decision(init_conn, symbol="SYSTEM", action="WAIT", confidence=100,
                             reason="Paper-Engine initialisiert; wartet auf validierte Marktdaten.",
                             approved=1, risk_code="NO_ORDER", risk_reason="Keine Order")
-        db.log_event(conn, "SYSTEM", "INFO", "STARTUP", f"v{VERSION}, mode=PAPER")
+        db.log_event(init_conn, "SYSTEM", "INFO", "STARTUP", f"v{VERSION}, mode=PAPER")
+    finally:
+        # Fixrunde 1, Punkt 3 (Koordinator/Reviewer): `with db.connect(...) as conn:`
+        # sieht wie ein automatisch schliessender Context-Manager aus, ist es bei
+        # sqlite3.Connection aber NICHT - `__exit__` committet/rollt nur die
+        # offene Transaktion zurueck, schliesst die Verbindung selbst jedoch nicht
+        # (anders als z.B. bei Dateien). Ohne dieses ausdrueckliche close() blieb
+        # die Verbindung fuer die Lebensdauer des Prozesses offen; gemessen in der
+        # Suite (16 create_app()-Aufrufe) waren das allein hier 16 nie geschlossene
+        # Handles.
+        init_conn.close()
 
-    specs = {s: store.get_symbol_spec(db.connect(db_path), s) or money.BUILTIN_SPECS.get(s)
-             for s in cfg.market_symbols}
+    specs_conn = db.connect(db_path)
+    try:
+        specs = {s: store.get_symbol_spec(specs_conn, s) or money.BUILTIN_SPECS.get(s)
+                 for s in cfg.market_symbols}
+    finally:
+        # Dieselbe Falle wie oben, hier zusaetzlich verschaerft: die Verbindung
+        # stand vorher direkt in der Dict-Comprehension, also einmal PRO SYMBOL
+        # (2 bei den Standardsymbolen) und nie geschlossen. Jetzt eine einzige,
+        # wiederverwendete Verbindung, die danach schliesst.
+        specs_conn.close()
     specs = {s: sp for s, sp in specs.items() if sp is not None}
     poller_thread: threading.Thread | None = None
     if cfg.market_data_enabled:
