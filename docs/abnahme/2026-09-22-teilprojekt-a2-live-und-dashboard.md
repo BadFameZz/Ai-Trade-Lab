@@ -28,6 +28,39 @@ Abgelesen im Proxmox-Webinterface, CT `ai-trade-lab` auf Node `pve`, unprivilegi
 | IPv6 | global routbar (`2003:…`) |
 | Uptime bei der Messung | 1 d 10:37 |
 
+## F-3 — Egress zu `api.binance.com` (beantwortet 2026-09-22) — **erreichbar**
+
+Gemessen aus CT 107 heraus, je drei Läufe, damit der DNS-Zwischenspeicher bei beiden
+Varianten warm ist:
+
+| | 1. Lauf | 2. Lauf | 3. Lauf |
+|---|---|---|---|
+| Dual-Stack (so ruft Aitra auf) | 1,150 s | **0,272 s** | **0,272 s** |
+| `curl -4` erzwungen | 0,277 s | 0,275 s | 0,271 s |
+
+**Eingeschwungen identisch.** Kein IPv6-Nachteil, weil es keinen IPv6-Versuch gibt:
+`curl -6` scheitert in **3 ms** — `api.binance.com` hat keinen AAAA-Eintrag.
+
+Die 0,818 s im ersten Lauf waren **ausschließlich Namensauflösung** (zweiter Lauf: 0,0017 s aus
+dem Zwischenspeicher). Eine frühere Einzelmessung von 6,0 s war dieselbe Ursache.
+
+> **Korrektur einer Fehldiagnose.** Aus den ersten zwei Messungen (6,0 s dual-stack gegen
+> 0,27 s mit `-4`) wurde „es ist IPv6" geschlossen und ein Umbau des Containers vorbereitet.
+> Die zweite Messung hatte einen **warmen DNS-Zwischenspeicher** — der Vergleich taugte nicht.
+> Die saubere Wiederholung widerlegt die Diagnose. **Am Container wurde nichts geändert.**
+> Das ist dasselbe Muster, das in A1 und A2 neunmal bei Tests beanstandet wurde: aus zwei
+> Messungen eine Ursache schließen.
+
+**Folgen für Aitra: keine.** Der Poller fragt alle 60 s, die Auflösung ist praktisch immer
+warm. Ein gelegentlicher kalter Zugriff mit 0,8 s liegt weit unter `TIMEOUT_S = 10,0`. Die
+Sicherheitsmarge der Zeitprojektion (N-2) entspricht der Rücklaufzeit, also rund 0,13 s — die
+Warnschwelle für Uhrversatz liegt bei 5 s.
+
+Unberührt bleibt die global routbare IPv6-Adresse des Containers. Sie ist per SLAAC aus der
+MAC gebildet (`BC:24:11:F3:C4:82` → `be24:11ff:fef3:c482`, nachgerechnet), steht **nicht** in
+der Proxmox-Konfiguration und ist ein **Sicherheits**thema, kein Geschwindigkeitsthema —
+dokumentiert im README, Abschnitt IPv6.
+
 ## A-16b · Platzbedarf pro Kerze — **erfüllt**
 
 | | Wert |
@@ -55,8 +88,7 @@ Fall, den die Spec vorsah („bei 2.048 MB → < 512 MB").
 
 | Punkt | Warum offen |
 |---|---|
-| **F-3 — Egress zu `api.binance.com`** | Nicht gemessen. Der gesamte Livebetrieb hängt daran. |
-| **A-10b Messung** | Braucht 24 h Live-Betrieb, also F-3. |
+| **A-10b Messung** | Braucht 24 h Live-Betrieb mit 0.3.0 auf CT 107. F-3 ist jetzt beantwortet, die Messung steht noch aus. |
 | **A-19a / A-19b Rauchlauf** | Kein Lauf gegen die echte Hardware für 0.3.0. Netz, Uhr und Container sind in allen 285 Tests Attrappen. |
 | **L-1 — kein Browsertest** | Bewusst. A-19b prüft Datenlage am Endpunkt und Verdrahtung im HTML, **nicht die Darstellung**. |
 | **N-3** | Im Lieferzustand (`MARKET_DATA_ENABLED=false`) verfällt ein schwebender Vorschlag nie — `expire_stale_pending()` hängt allein am Poller. |
