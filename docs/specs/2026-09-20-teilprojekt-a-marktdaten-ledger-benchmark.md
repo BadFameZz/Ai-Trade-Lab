@@ -1279,6 +1279,7 @@ eingesetzt werden kann, ohne den Text umzuschreiben.
 
 | Nr. | Antwort |
 |---|---|
+| F-1 | **Beantwortet 2026-09-22** (Proxmox-Webinterface, CT `ai-trade-lab`, unprivilegiert): RAM **2,00 GiB**, Bootdisk **15,58 GiB**, 2 Kerne, 512 MiB Swap. Damit ist A-10b auf **< 512 MiB RSS** festgelegt und der Plattenanteil von A-16b gerechnet: 13,37 MB gegen 1.673 MB (10 % der Disk), **Faktor 125** darunter. Siehe `docs/abnahme/2026-09-22-teilprojekt-a2-live-und-dashboard.md` |
 | F-2 | Python bleibt **3.12** (`python:3.12-slim`); 3.13 war die Bauumgebung |
 | F-4 | **BTCUSDC und BNBUSDC**, Intervall **15m** (Fassung 2 hatte 1h); Rückfüllung 400 Tage |
 | F-5 | **`STARTING_BALANCE = 10000`** — K-1 … K-3 gerechnet; Umsetzung auf Bestandscontainern über A-22 |
