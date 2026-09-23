@@ -60,6 +60,37 @@ def get_candles(
     conn: sqlite3.Connection, symbol: str, interval: str,
     start_ms: int | None = None, end_ms: int | None = None, limit: int = 500,
 ) -> list[CandleRow]:
+    """Die JUENGSTEN `limit` Kerzen des Fensters, chronologisch aufsteigend (B-D1).
+
+    Der Vertrag hat zwei Haelften, und beide werden gebraucht:
+
+    (1) Ein bindendes LIMIT schneidet die AELTESTEN Zeilen weg. Alle
+        limit-getriebenen Aufrufer (dashboard.last_prices, web.risk_check,
+        GET /api/market/candles) lesen rows[-1] als "die juengste Kerze".
+    (2) Das Ergebnis ist IMMER aufsteigend - auch wenn das LIMIT gebissen hat.
+        replay._load_candles_from_db() laeuft candles[0..n-1] in Zeitrichtung
+        ab; ein blosses ORDER BY ... DESC liesse den Zeitraffer rueckwaerts
+        durch den Markt laufen.
+
+    Vorher stand hier ORDER BY open_time ASC LIMIT ?. Das lieferte die
+    AELTESTEN N. Auf CT 107 gemessen (2026-09-23, 38.399 Kerzen je Symbol):
+    GET /api/market/candles gab den Stand vom 2025-08-19 (115.560,01) statt
+    vom 2026-09-23 (85.454,11) - rund 35 % daneben auf dem Preis, der die
+    gesamte Live-Equity bewertet. Ein Buchverlust von 30.105,90 USDC wurde als
+    pnl 0,00 gemeldet, und ueber to_portfolio_state() sah die
+    Tagesverlustgrenze - und damit der Kill Switch - ihn nie.
+
+    Mit start_ms/end_ms und grosszuegigem limit bindet das LIMIT nicht; dort
+    ist das Ergebnis unveraendert das komplette Fenster in Zeitrichtung. Der
+    einzige produktive Aufrufer dieses Pfades ist replay._load_candles_from_db()
+    (limit=1_000_000). Backfill und Benchmark rufen get_candles() NICHT auf —
+    backfill.py liest ueber BinanceClient.klines(), der Benchmark bekommt seine
+    Kerzen vom Poller gereicht.
+
+    ACHTUNG fuer kuenftige Aufrufer: bindet das LIMIT innerhalb eines
+    Zeitfensters doch einmal, schneidet es jetzt VORNE ab (die aeltesten
+    Zeilen fallen weg), nicht mehr hinten.
+    """
     sql = "SELECT * FROM candles WHERE symbol = ? AND interval = ?"
     args: list = [symbol, interval]
     if start_ms is not None:
@@ -68,7 +99,7 @@ def get_candles(
     if end_ms is not None:
         sql += " AND open_time <= ?"
         args.append(end_ms)
-    sql += " ORDER BY open_time ASC LIMIT ?"
+    sql = f"SELECT * FROM ({sql} ORDER BY open_time DESC LIMIT ?) ORDER BY open_time ASC"
     args.append(limit)
     out = []
     for r in conn.execute(sql, args).fetchall():

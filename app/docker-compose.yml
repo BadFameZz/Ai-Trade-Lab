@@ -8,7 +8,11 @@ services:
     environment:
       TRADING_MODE: paper   # Live ist in dieser Version nicht implementiert
     ports:
-      - "8787:8787"
+      # Host-Adresse ist PFLICHT (H-1 / E-011): ohne sie legt Docker zwei
+      # Listener an, 0.0.0.0:8787 UND [::]:8787 - letzterer umfasst die global
+      # routbare IPv6-Adresse des Containers, und dahinter steht ein Dashboard
+      # ohne Login. Festgenagelt in tests/test_portfreigabe_h1.py.
+      - "0.0.0.0:8787:8787"
     volumes:
       - ./data:/app/data
     read_only: true

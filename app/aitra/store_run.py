@@ -143,8 +143,17 @@ def append_equity_points(conn: sqlite3.Connection, punkte: Sequence[EquityPoint]
 
 
 def get_equity_curve(conn: sqlite3.Connection, run_id: str, limit: int = 500) -> list[dict]:
+    """Die JUENGSTEN `limit` Punkte, chronologisch aufsteigend (B-D1).
+
+    Dasselbe Muster wie store.get_candles(): vorher ORDER BY ts_ms ASC LIMIT ?,
+    also die AELTESTEN N - waehrend GET /api/equity-curve und
+    dashboard.build_status() das Ergebnis als "die neuesten" lesen
+    (curve[-1]["benchmark_equity"]). Aufsteigend bleibt es, weil build_status()
+    den Max Drawdown ueber die Kurve in Zeitrichtung nachrechnet.
+    """
     rows = conn.execute(
-        "SELECT * FROM equity_curve WHERE run_id = ? ORDER BY ts_ms ASC LIMIT ?", (run_id, limit),
+        "SELECT * FROM (SELECT * FROM equity_curve WHERE run_id = ? "
+        "ORDER BY ts_ms DESC LIMIT ?) ORDER BY ts_ms ASC", (run_id, limit),
     ).fetchall()
     out = []
     for r in rows:

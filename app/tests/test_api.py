@@ -8,6 +8,7 @@ from aitra.config import Config
 from aitra.web import create_app
 
 TOKEN = "t" * 32
+KERZE_MS = 900_000  # Kerzenabstand der Fixtur, passend zum interval-Vorgabewert "15m"
 
 
 @pytest.fixture
@@ -67,10 +68,20 @@ def test_persistence_across_restart(tmp_path):
     assert create_app(cfg).test_client().get("/api/status").get_json()["kill_switch"] is True
 
 
-def _mit_marktdaten(app, symbol="BTCUSDC", interval="15m", preis="81287.03"):
-    """Legt eine einzelne, bereits geschlossene Kerze fuer symbol an - Grundlage
-    fuer jeden Test, der /api/risk/check oder /api/status mit echten Zahlen
-    braucht.
+def _mit_marktdaten(app, symbol="BTCUSDC", interval="15m", preis="81287.03",
+                     vorgeschichte=("115560.01", "100000.00")):
+    """Legt eine kurze, bereits geschlossene Kerzenhistorie fuer symbol an -
+    Grundlage fuer jeden Test, der /api/risk/check oder /api/status mit echten
+    Zahlen braucht. `preis` ist der Schlusskurs der JUENGSTEN Kerze.
+
+    B-D1 (2026-09-23): Diese Funktion legte frueher GENAU EINE Kerze an. Bei
+    einer Zeile sind aelteste und neueste dieselbe Zeile - store.get_candles()
+    sortiert ORDER BY open_time ASC LIMIT ? und liefert damit die AELTESTEN N,
+    aber jeder Aufrufer liest rows[-1] als "die neueste". Mit einer Kerze war
+    diese Pruefflaeche leer, und der Fehler ueberlebte die gesamte Testsuite
+    (auf CT 107 gemessen: /api/market/candles zeigte 2025-08-19 / 115560.01
+    statt 2026-09-23 / 85454.11, rund 35 % daneben). Die Vorgeschichte hat
+    deshalb bewusst DEUTLICH andere Preise als die juengste Kerze.
 
     Abweichung vom Brief (gemeldet, nicht stillschweigend behoben): der Brief
     sah hier zusaetzlich einen toten `with app.app_context(): ... conn.row_factory__
@@ -79,15 +90,34 @@ def _mit_marktdaten(app, symbol="BTCUSDC", interval="15m", preis="81287.03"):
     weil sqlite3.Connection keine beliebigen Attribute erlaubt - jeder Aufruf
     dieser Funktion waere damit rot, bevor er die eigentliche Kerze anlegt.
     Entfernt; die zweite, unbedingt ausgefuehrte conn-Zeile leistet die
-    eigentliche Arbeit bereits."""
+    eigentliche Arbeit bereits.
+
+    R3 (Reviewer-Befund, Fixrunde nach dem Gesamtreview): der Rueckgabewert -
+    die open_time der JUENGSTEN angelegten Kerze - war tote Verkabelung. Alle
+    sechs Aufrufstellen warfen ihn weg, waehrend zwei Tests dieselbe Zahl
+    (1.800.000 bzw. 2.700.000) hart hineinschrieben. Entschieden wurde fuer
+    VERWENDEN statt Streichen: die beiden Tests behaupten in ihrem eigenen
+    Text, sie pruefen die JUENGSTE Kerze. Steht die Zahl hart drin, ist das bei
+    einer laengeren `vorgeschichte` nicht mehr die juengste, sondern eine
+    beliebige mittlere - und der Test prueft still etwas anderes, als er sagt.
+    Genau die B-D1-Falle, nur eine Ebene hoeher. Der Rueckgabewert hat
+    seinerseits eine eigene Prueffläche bekommen (siehe
+    test_mit_marktdaten_liefert_die_open_time_der_juengsten_kerze)."""
+    preise = [*vorgeschichte, preis]  # aeltest -> juengst
     conn = db.connect(app.config["AITRA"].data_dir / "aitra.db")
     store.upsert_candles(conn, [
-        store.CandleRow(symbol=symbol, interval=interval, open_time=0, close_time=899_999,
-                         open=Decimal(preis), high=Decimal(preis), low=Decimal(preis),
-                         close=Decimal(preis), volume=Decimal("1"), source="fixture",
-                         fetched_at="2026-01-01T00:00:00Z"),
+        store.CandleRow(symbol=symbol, interval=interval, open_time=i * KERZE_MS,
+                         close_time=i * KERZE_MS + KERZE_MS - 1,
+                         open=Decimal(p), high=Decimal(p), low=Decimal(p),
+                         close=Decimal(p), volume=Decimal("1"), source="fixture",
+                         fetched_at="2026-01-01T00:00:00Z")
+        for i, p in enumerate(preise)
     ])
+    # Pruefflaeche: ohne mehrere, unterschiedlich bepreiste Kerzen koennte kein
+    # Test dieser Datei eine Verwechslung von "aelteste" und "neueste" sehen.
+    assert len(preise) >= 2 and len(set(preise)) == len(preise)
     conn.close()
+    return (len(preise) - 1) * KERZE_MS  # open_time der juengsten Kerze
 
 
 def test_status_positionen_und_trades_total_sind_echt(client, app):
@@ -148,13 +178,28 @@ def test_risk_check_liefert_pending_fill_ueber_execute_proposal(client, app):
     sizing.size_order() mit MIN_NOTIONAL scheitern, nie schwebend werden -
     gemessen, nicht geraten (siehe Bericht). 8 % bleibt unter max_position_pct
     (10) und liegt sicher ueber der Mindestgroesse."""
-    _mit_marktdaten(app)
+    juengste_open_time = _mit_marktdaten(app)
     h = {"X-Admin-Token": TOKEN}
     r = client.post("/api/risk/check", headers=h,
                      json={"symbol": "BTCUSDC", "action": "BUY", "position_pct": 8})
     body = r.get_json()
     assert body["status"] == "pending_fill", f"Pruefflaeche: {body.get('status')!r}"
-    assert body["expected_fill_after_ms"] == 900_000
+    # B-D1: die JUENGSTE Kerze bestimmt die Fuellgrenze, nicht die aelteste der
+    # drei aus _mit_marktdaten(). R3: die Grenze wird aus dem Rueckgabewert der
+    # Fixtur abgeleitet (close_time + 1 = open_time + KERZE_MS) statt hart
+    # hineingeschrieben - sonst zeigte die Zahl nach einer laengeren
+    # `vorgeschichte` weiter auf eine mittlere Kerze, waehrend der Text oben
+    # "die juengste" behauptet.
+    assert juengste_open_time > 0, (
+        "Pruefflaeche: die Fixtur muss MEHRERE Kerzen angelegt haben - bei einer "
+        "einzigen waere open_time 0 und der Test blind fuer die Verwechslung von "
+        "aeltester und juengster Kerze (B-D1)."
+    )
+    erwartet = juengste_open_time + KERZE_MS  # = close_time + 1 der juengsten Kerze
+    assert body["expected_fill_after_ms"] == erwartet, (
+        f"expected_fill_after_ms = {body['expected_fill_after_ms']}, erwartet {erwartet} "
+        f"(close_time + 1 der juengsten Kerze, open_time {juengste_open_time})"
+    )
     # Nadeloehr: kein sofortiger Fill (E-006) - trades_total bleibt 0
     assert client.get("/api/status").get_json()["trades_total"] == 0
 
@@ -167,28 +212,101 @@ def test_risk_check_ohne_marktdaten_liefert_503(client):
 
 
 def test_market_candles_endpoint(client, app):
-    _mit_marktdaten(app)
+    """B-D1: war eine Attrappe. Vorher legte _mit_marktdaten() genau EINE Kerze
+    an und der Test prueft `len(body) == 1` - bei einer Zeile sind aelteste und
+    neueste dieselbe Zeile, der Endpunkt konnte die beiden gar nicht
+    verwechseln. Jetzt drei Kerzen mit drei verschiedenen Preisen, und geprueft
+    wird die REIHENFOLGE und WELCHE Kerzen ankommen."""
+    juengste_open_time = _mit_marktdaten(app)
     r = client.get("/api/market/candles?symbol=BTCUSDC&interval=15m&limit=10")
     assert r.status_code == 200
     body = r.get_json()
-    assert len(body) == 1, f"Pruefflaeche: {len(body)} Kerzen statt 1"
-    assert body[0]["close"] == "81287.03000000"
+    assert len(body) == 3, f"Pruefflaeche: {len(body)} Kerzen statt 3"
+    # R3: der letzte Eintrag kommt aus dem Rueckgabewert der Fixtur, nicht als
+    # harte Zahl - er ist genau die Behauptung dieses Tests ("die juengste
+    # Kerze steht hinten").
+    assert [k["open_time"] for k in body] == [0, KERZE_MS, juengste_open_time], (
+        f"chronologisch aufsteigend erwartet, gemessen: {[k['open_time'] for k in body]}"
+    )
+    assert [k["close"] for k in body] == [
+        "115560.01000000", "100000.00000000", "81287.03000000"
+    ], f"gemessen: {[k['close'] for k in body]}"
     assert isinstance(body[0]["close"], str), "Geld als String (E-007)"
+
+    # Das eigentliche Nadeloehr: ein bindendes LIMIT muss die AELTESTEN Kerzen
+    # wegschneiden, nicht die juengsten (auf CT 107 kam mit limit=3 der Stand
+    # vom 2025-08-19 statt vom 2026-09-23 zurueck).
+    gedeckelt = client.get("/api/market/candles?symbol=BTCUSDC&interval=15m&limit=2").get_json()
+    assert len(gedeckelt) == 2, f"Pruefflaeche: {len(gedeckelt)} Kerzen statt 2"
+    assert [k["open_time"] for k in gedeckelt] == [KERZE_MS, juengste_open_time], (
+        f"limit=2 muss die juengsten zwei Kerzen liefern, aufsteigend; gemessen: "
+        f"{[k['open_time'] for k in gedeckelt]} mit Schluessen {[k['close'] for k in gedeckelt]}"
+    )
+    assert gedeckelt[-1]["close"] == "81287.03000000"
+
+
+def test_mit_marktdaten_liefert_die_open_time_der_juengsten_kerze(client, app):
+    """R3: die Prueffläche fuer den Rueckgabewert der Fixtur selbst.
+
+    Zwei Tests dieser Datei leiten jetzt ihre Erwartung aus diesem Wert ab.
+    Waere die Formel falsch, waeren beide still falsch - und weil sie ihre
+    Erwartung aus derselben Quelle ziehen, wuerden sie es nicht bemerken.
+    Deshalb wird der Wert hier gegen eine UNABHAENGIGE Quelle geprueft: die
+    Kerzen, wie sie GET /api/market/candles zurueckgibt.
+
+    Bewusst mit einer ANDEREN Fixturlaenge als der Vorgabewert (fuenf statt
+    drei Kerzen) - eine Formel, die nur zufaellig fuer drei stimmt, faellt hier
+    auf."""
+    juengste = _mit_marktdaten(
+        app, preis="70000.00",
+        vorgeschichte=("115560.01", "100000.00", "90000.00", "80000.00"),
+    )
+    body = client.get("/api/market/candles?symbol=BTCUSDC&interval=15m&limit=10").get_json()
+    assert len(body) == 5, f"Pruefflaeche: {len(body)} Kerzen statt 5"
+    assert body[-1]["close"] == "70000.00000000", (
+        f"Pruefflaeche: hinten muss die juengste Kerze stehen, gemessen {body[-1]['close']}"
+    )
+    assert juengste == body[-1]["open_time"], (
+        f"_mit_marktdaten() meldet open_time {juengste} als juengste Kerze, der "
+        f"Kerzenendpunkt liefert aber {body[-1]['open_time']} "
+        f"(alle: {[k['open_time'] for k in body]}). Jeder Test, der seine Erwartung "
+        "aus diesem Rueckgabewert ableitet, prueft damit die falsche Kerze."
+    )
+    assert juengste != body[0]["open_time"], (
+        "Pruefflaeche: juengste und aelteste open_time duerfen nicht dieselbe Zahl "
+        "sein, sonst unterscheidet dieser Test die beiden Deutungen nicht (B-D1)."
+    )
 
 
 def test_equity_curve_endpoint(client, app):
+    """B-D1: dieselbe Attrappe wie bei den Kerzen - ein einziger Punkt kann
+    nicht zeigen, ob der Endpunkt die aeltesten oder die juengsten liefert."""
     conn = db.connect(app.config["AITRA"].data_dir / "aitra.db")
     store_run.ensure_run(conn, "live", "live", db.now(), "0.3.0")
-    store_run.append_equity_points(conn, [store_run.EquityPoint(
-        run_id="live", ts_ms=900_000, equity=Decimal("10000"), cash=Decimal("9186.32"),
-        benchmark_equity=Decimal("10050"), exposure_pct=8.1,
-    )])
+    store_run.append_equity_points(conn, [
+        store_run.EquityPoint(
+            run_id="live", ts_ms=(i + 1) * 900_000, equity=Decimal(str(10_000 + i)),
+            cash=Decimal("9186.32"), benchmark_equity=Decimal(str(10_050 + i)),
+            exposure_pct=8.1,
+        )
+        for i in range(3)
+    ])
     conn.close()
     body = client.get("/api/equity-curve?run_id=live&limit=500").get_json()
     assert body["run_id"] == "live"
-    assert len(body["points"]) == 1, f"Pruefflaeche: {len(body['points'])} Punkte statt 1"
+    assert len(body["points"]) == 3, f"Pruefflaeche: {len(body['points'])} Punkte statt 3"
+    assert [p["ts_ms"] for p in body["points"]] == [900_000, 1_800_000, 2_700_000]
     assert isinstance(body["points"][0]["equity"], str)
-    assert body["points"][0]["benchmark"] == "10050.00000000"
+    assert body["points"][-1]["benchmark"] == "10052.00000000"
+
+    # Bindendes LIMIT: die juengsten Punkte muessen ueberleben, aufsteigend.
+    gedeckelt = client.get("/api/equity-curve?run_id=live&limit=2").get_json()["points"]
+    assert len(gedeckelt) == 2, f"Pruefflaeche: {len(gedeckelt)} Punkte statt 2"
+    assert [p["ts_ms"] for p in gedeckelt] == [1_800_000, 2_700_000], (
+        f"limit=2 muss die juengsten zwei Punkte liefern, aufsteigend; gemessen: "
+        f"{[p['ts_ms'] for p in gedeckelt]} mit equity {[p['equity'] for p in gedeckelt]}"
+    )
+    assert gedeckelt[-1]["equity"] == "10002.00000000"
 
 
 # Fixrunde 2, Punkt 1 (Koordinator/Reviewer): die vorherige Fassung klapperte eine

@@ -13,10 +13,10 @@ from dataclasses import replace
 from decimal import Decimal
 from typing import Mapping
 
-from . import money
+from . import money, store_run
 from .config import Config
 from .execute import ExecutionContext, execute_proposal
-from .ledger import Ledger
+from .ledger import Ledger, Position
 from .marketdata import Candle, Clock
 from .risk import Proposal, RiskEngine
 
@@ -65,18 +65,63 @@ class BuyAndHold:
             starting_cash=cfg.starting_balance, specs={symbol: spec},
             fee_bps=fee_bps, slippage_bps=slippage_bps,
         )
+        # B-D5: Zustand aus dem Journal, nicht aus dem Speicher (A-14, genau
+        # wie poller.build_context() es fuer das Live-Ledger tut). Ohne das
+        # fing der Benchmark nach jedem Prozessstart wieder bei
+        # starting_balance an und kaufte ein zweites Mal — dreimal in der
+        # laufenden Anlage gemessen (CT 107, 2026-09-23), Benchmark-Equity
+        # 9.950,98 statt 9.817,04 (1,3643 % zu hoch). Alpha gegen einen
+        # Vergleichsgegner, der sich bei jedem Neustart zurueckstellt, ist
+        # bedeutungslos.
+        #
+        # Leeres Journal heisst Frischstart, und das ist der RICHTIGE Fall
+        # fuer replay.run_replay(): jeder Zeitraffer ist ein eigener Lauf
+        # (bench-<run_id>) und beginnt bei starting_balance. Beide Faelle
+        # bedient derselbe Zweig, weil ein frischer Lauf keine Fills hat.
+        fills = store_run.get_fills(conn, run_id)
+        if fills:
+            positionen = {s: Position(s, p["qty"], p["avg_price"], p["realized_pnl"])
+                          for s, p in store_run.get_positions(conn, run_id).items()}
+            ledger.restore(positionen, fills[-1]["cash_after"])
+            # Ledger.restore() laesst last_marks bewusst leer (E-010/Weg A).
+            # Fuer eine GEHALTENE Position ist das hier gefaehrlich: mark()
+            # wirft, wenn zu ihr kein Preis vorliegt, und poller.poll_once()
+            # reicht dem Benchmark nur die Preise durch, die es in dieser
+            # Runde gibt — bleibt die Kerze des Benchmark-Symbols einmal aus
+            # (Abruf-Fehlschlag, waehrend ein anderes Symbol liefert), risse
+            # das den ganzen Zyklus mit. Deshalb ein Ausgangspreis aus dem
+            # Journal: der avg_price der wiederhergestellten Position. Das ist
+            # NICHT derselbe Wert, den apply() ablegt — apply() setzt
+            # last_marks[symbol] auf candle_next.open, also VOR Slippage
+            # (ledger.py:127), waehrend avg_price der Fuellpreis INKLUSIVE
+            # Slippage ist. Gemessen (fee 10 bps, slippage 5 bps, Kauf auf
+            # einer 100.000er-Kerze): 100.000,00 gegen 100.050,00, also rund
+            # slippage_bps auseinander. Ein genauerer Ausgangspreis ist aus dem
+            # Journal nicht rekonstruierbar, und er muss auch nicht genau sein:
+            # er gilt hoechstens eine Runde. mark() ist rein (keine DB,
+            # keine Uhr); der Rueckgabewert wird nicht gebraucht, gesetzt wird
+            # nur der Ausgangspreis, den die erste echte Kerze ueberschreibt —
+            # equity() laesst den frischen Preis immer vorgehen.
+            ledger.mark({s: p.avg_price for s, p in positionen.items() if p.qty != 0},
+                        ts_ms=fills[-1]["candle_open_time"])
         self._ctx = ExecutionContext(
             conn=conn, run_id=run_id, ledger=ledger, engine=RiskEngine(permissive_cfg),
             specs={symbol: spec}, fee_bps=fee_bps, slippage_bps=slippage_bps, clock=clock,
         )
         self._symbol = symbol
-        self._bought = False
+        self._bought = bool(fills)
         margin_pct = self._MARGIN_FACTOR * (fee_bps + slippage_bps) / 100.0
         self._position_pct = max(1.0, 100.0 - margin_pct)
 
     @property
     def bought(self) -> bool:
-        """Ob der Kauf bereits ausgefuehrt wurde."""
+        """Ob der Kauf bereits ausgefuehrt wurde.
+
+        Beim Bau aus dem Journal abgeleitet (B-D5), nicht aus dem Speicher:
+        Buy & Hold verkauft nie, ein Fill unter dieser run_id heisst also
+        gekauft. Ein neu gestarteter Prozess weiss damit dasselbe wie der
+        alte (A-14).
+        """
         return self._bought
 
     def on_candle(self, candle: Candle, prev_candle: Candle | None) -> None:
@@ -104,5 +149,13 @@ class BuyAndHold:
             self._bought = True
 
     def equity(self, marks: Mapping[str, Decimal], ts_ms: int) -> Decimal:
-        """Bewertet Kasse + Position zu den gegebenen Marktpreisen."""
-        return self._ctx.ledger.mark(marks, ts_ms).equity
+        """Bewertet Kasse + Position zu den gegebenen Marktpreisen.
+
+        Fehlende Preise werden ausdruecklich aus last_marks ergaenzt — genau
+        wie poller.poll_once() es fuer das Live-Ledger tut (ledger.mark()
+        verlangt das an der Aufrufstelle, siehe dessen Docstring). Die
+        uebergebenen Preise gehen immer vor; last_marks traegt nur den letzten
+        bekannten Stand fuer eine Runde, in der zu diesem Symbol keine Kerze
+        ankam.
+        """
+        return self._ctx.ledger.mark({**self._ctx.ledger.last_marks, **marks}, ts_ms).equity
